@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS property_raw
     status LowCardinality(String),
     acknowledgement_number String,
     creation_reason LowCardinality(String),
-    no_of_floors Int64,
+    no_of_floors Int8,
     source LowCardinality(String),
     channel LowCardinality(String),
 
@@ -71,11 +71,11 @@ CREATE TABLE IF NOT EXISTS unit_raw
     unit_id String,
 
     -- Unit Attributes
-    floor_no Int64,
+    floor_no Int8,
     unit_type LowCardinality(String),
     usage_category LowCardinality(String),
     occupancy_type LowCardinality(String),
-    occupancy_date Int64,
+    occupancy_date Date,
 
     -- Area Info
     carpet_area Decimal(10, 2),

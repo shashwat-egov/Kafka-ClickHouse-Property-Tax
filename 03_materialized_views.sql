@@ -75,7 +75,7 @@ SELECT
     JSONExtractString(unit, 'unitType') AS unit_type,
     JSONExtractString(unit, 'usageCategory') AS usage_category,
     JSONExtractString(unit, 'occupancyType') AS occupancy_type,
-    JSONExtractInt(unit, 'occupancyDate') AS occupancy_date,
+    toDate(fromUnixTimestamp64Milli(JSONExtractUInt(unit, 'occupancyDate'))) AS occupancy_date,
 
     -- Area Info
     toDecimal64OrZero(JSONExtractString(unit, 'carpetArea'), 2) AS carpet_area,
