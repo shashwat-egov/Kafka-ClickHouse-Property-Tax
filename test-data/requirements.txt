@@ -1,0 +1,2 @@
+# Python dependencies for test data generation
+kafka-python>=2.0.2
