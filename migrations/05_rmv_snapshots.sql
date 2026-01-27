@@ -12,6 +12,7 @@
 -- RMV: Property Snapshot
 -- Source: property_raw
 -- Dedup Key: (tenant_id, property_id)
+-- Maps to eg_pt_property table
 -- ############################################################################
 CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_property_snapshot
 REFRESH EVERY 1 DAY OFFSET 1 HOUR
@@ -20,19 +21,23 @@ EMPTY
 AS
 SELECT
     today() AS snapshot_date,
+    argMax(id, (lmt, ver)) AS id,
     tenant_id,
     property_id,
+    argMax(survey_id, (lmt, ver)) AS survey_id,
+    argMax(account_id, (lmt, ver)) AS account_id,
+    argMax(old_property_id, (lmt, ver)) AS old_property_id,
     argMax(property_type, (lmt, ver)) AS property_type,
     argMax(usage_category, (lmt, ver)) AS usage_category,
     argMax(ownership_category, (lmt, ver)) AS ownership_category,
     argMax(status, (lmt, ver)) AS status,
     argMax(acknowledgement_number, (lmt, ver)) AS acknowledgement_number,
-    argMax(assessment_number, (lmt, ver)) AS assessment_number,
-    argMax(financial_year, (lmt, ver)) AS financial_year,
+    argMax(creation_reason, (lmt, ver)) AS creation_reason,
+    argMax(no_of_floors, (lmt, ver)) AS no_of_floors,
     argMax(source, (lmt, ver)) AS source,
     argMax(channel, (lmt, ver)) AS channel,
     argMax(land_area, (lmt, ver)) AS land_area,
-    argMax(land_area_unit, (lmt, ver)) AS land_area_unit,
+    argMax(super_built_up_area, (lmt, ver)) AS super_built_up_area,
     argMax(created_by, (lmt, ver)) AS created_by,
     argMax(created_time, (lmt, ver)) AS created_time,
     argMax(last_modified_by, (lmt, ver)) AS last_modified_by,
@@ -49,6 +54,7 @@ GROUP BY tenant_id, property_id;
 -- RMV: Unit Snapshot
 -- Source: unit_raw
 -- Dedup Key: (tenant_id, property_id, unit_id)
+-- Maps to eg_pt_unit table
 -- ############################################################################
 CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_unit_snapshot
 REFRESH EVERY 1 DAY OFFSET 1 HOUR
@@ -65,10 +71,17 @@ SELECT
     argMax(usage_category, (lmt, ver)) AS usage_category,
     argMax(occupancy_type, (lmt, ver)) AS occupancy_type,
     argMax(occupancy_date, (lmt, ver)) AS occupancy_date,
-    argMax(constructed_area, (lmt, ver)) AS constructed_area,
     argMax(carpet_area, (lmt, ver)) AS carpet_area,
     argMax(built_up_area, (lmt, ver)) AS built_up_area,
-    argMax(arv_amount, (lmt, ver)) AS arv_amount,
+    argMax(plinth_area, (lmt, ver)) AS plinth_area,
+    argMax(super_built_up_area, (lmt, ver)) AS super_built_up_area,
+    argMax(arv, (lmt, ver)) AS arv,
+    argMax(construction_type, (lmt, ver)) AS construction_type,
+    argMax(construction_date, (lmt, ver)) AS construction_date,
+    argMax(active, (lmt, ver)) AS active,
+    argMax(created_by, (lmt, ver)) AS created_by,
+    argMax(created_time, (lmt, ver)) AS created_time,
+    argMax(last_modified_by, (lmt, ver)) AS last_modified_by,
     max(lmt) AS last_modified_time,
     max(ver) AS version
 FROM (
@@ -81,7 +94,8 @@ GROUP BY tenant_id, property_id, unit_id;
 -- ############################################################################
 -- RMV: Owner Snapshot
 -- Source: owner_raw
--- Dedup Key: (tenant_id, property_id, owner_id)
+-- Dedup Key: (tenant_id, property_id, owner_info_uuid)
+-- Maps to eg_pt_owner table
 -- ############################################################################
 CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_owner_snapshot
 REFRESH EVERY 1 DAY OFFSET 1 HOUR
@@ -92,34 +106,31 @@ SELECT
     today() AS snapshot_date,
     tenant_id,
     property_id,
-    owner_id,
-    argMax(name, (lmt, ver)) AS name,
-    argMax(mobile_number, (lmt, ver)) AS mobile_number,
-    argMax(email, (lmt, ver)) AS email,
-    argMax(gender, (lmt, ver)) AS gender,
-    argMax(father_or_husband_name, (lmt, ver)) AS father_or_husband_name,
-    argMax(relationship, (lmt, ver)) AS relationship,
-    argMax(owner_type, (lmt, ver)) AS owner_type,
-    argMax(owner_info_uuid, (lmt, ver)) AS owner_info_uuid,
-    argMax(institution_id, (lmt, ver)) AS institution_id,
-    argMax(document_type, (lmt, ver)) AS document_type,
-    argMax(document_uid, (lmt, ver)) AS document_uid,
-    argMax(ownership_percentage, (lmt, ver)) AS ownership_percentage,
+    owner_info_uuid,
+    argMax(user_id, (lmt, ver)) AS user_id,
+    argMax(status, (lmt, ver)) AS status,
     argMax(is_primary_owner, (lmt, ver)) AS is_primary_owner,
-    argMax(is_active, (lmt, ver)) AS is_active,
+    argMax(owner_type, (lmt, ver)) AS owner_type,
+    argMax(ownership_percentage, (lmt, ver)) AS ownership_percentage,
+    argMax(institution_id, (lmt, ver)) AS institution_id,
+    argMax(relationship, (lmt, ver)) AS relationship,
+    argMax(created_by, (lmt, ver)) AS created_by,
+    argMax(created_time, (lmt, ver)) AS created_time,
+    argMax(last_modified_by, (lmt, ver)) AS last_modified_by,
     max(lmt) AS last_modified_time,
     max(ver) AS version
 FROM (
     SELECT *, last_modified_time AS lmt, version AS ver
     FROM owner_raw
 )
-GROUP BY tenant_id, property_id, owner_id;
+GROUP BY tenant_id, property_id, owner_info_uuid;
 
 
 -- ############################################################################
 -- RMV: Address Snapshot
 -- Source: address_raw
 -- Dedup Key: (tenant_id, property_id)
+-- Maps to eg_pt_address table
 -- ############################################################################
 CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_address_snapshot
 REFRESH EVERY 1 DAY OFFSET 1 HOUR
@@ -132,10 +143,11 @@ SELECT
     property_id,
     argMax(address_id, (lmt, ver)) AS address_id,
     argMax(door_no, (lmt, ver)) AS door_no,
+    argMax(plot_no, (lmt, ver)) AS plot_no,
     argMax(building_name, (lmt, ver)) AS building_name,
     argMax(street, (lmt, ver)) AS street,
-    argMax(locality_code, (lmt, ver)) AS locality_code,
-    argMax(locality_name, (lmt, ver)) AS locality_name,
+    argMax(landmark, (lmt, ver)) AS landmark,
+    argMax(locality, (lmt, ver)) AS locality,
     argMax(city, (lmt, ver)) AS city,
     argMax(district, (lmt, ver)) AS district,
     argMax(region, (lmt, ver)) AS region,
@@ -144,6 +156,9 @@ SELECT
     argMax(pin_code, (lmt, ver)) AS pin_code,
     argMax(latitude, (lmt, ver)) AS latitude,
     argMax(longitude, (lmt, ver)) AS longitude,
+    argMax(created_by, (lmt, ver)) AS created_by,
+    argMax(created_time, (lmt, ver)) AS created_time,
+    argMax(last_modified_by, (lmt, ver)) AS last_modified_by,
     max(lmt) AS last_modified_time,
     max(ver) AS version
 FROM (
@@ -157,6 +172,7 @@ GROUP BY tenant_id, property_id;
 -- RMV: Demand Snapshot
 -- Source: demand_raw
 -- Dedup Key: (tenant_id, demand_id)
+-- Maps to egbs_demand_v1 table
 -- ############################################################################
 CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_demand_snapshot
 REFRESH EVERY 1 DAY OFFSET 1 HOUR
@@ -170,16 +186,15 @@ SELECT
     argMax(consumer_code, (lmt, ver)) AS consumer_code,
     argMax(consumer_type, (lmt, ver)) AS consumer_type,
     argMax(business_service, (lmt, ver)) AS business_service,
+    argMax(payer, (lmt, ver)) AS payer,
     argMax(tax_period_from, (lmt, ver)) AS tax_period_from,
     argMax(tax_period_to, (lmt, ver)) AS tax_period_to,
-    argMax(billing_period, (lmt, ver)) AS billing_period,
     argMax(status, (lmt, ver)) AS status,
     argMax(is_payment_completed, (lmt, ver)) AS is_payment_completed,
     argMax(financial_year, (lmt, ver)) AS financial_year,
     argMax(minimum_amount_payable, (lmt, ver)) AS minimum_amount_payable,
-    argMax(payer_name, (lmt, ver)) AS payer_name,
-    argMax(payer_mobile, (lmt, ver)) AS payer_mobile,
-    argMax(payer_email, (lmt, ver)) AS payer_email,
+    argMax(bill_expiry_time, (lmt, ver)) AS bill_expiry_time,
+    argMax(fixed_bill_expiry_date, (lmt, ver)) AS fixed_bill_expiry_date,
     argMax(created_by, (lmt, ver)) AS created_by,
     argMax(created_time, (lmt, ver)) AS created_time,
     argMax(last_modified_by, (lmt, ver)) AS last_modified_by,
@@ -196,6 +211,7 @@ GROUP BY tenant_id, demand_id;
 -- RMV: Demand Detail Snapshot
 -- Source: demand_detail_raw
 -- Dedup Key: (tenant_id, demand_id, tax_head_code)
+-- Maps to egbs_demanddetail_v1 table
 -- ############################################################################
 CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_demand_detail_snapshot
 REFRESH EVERY 1 DAY OFFSET 1 HOUR
@@ -208,11 +224,11 @@ SELECT
     demand_id,
     argMax(demand_detail_id, (lmt, ver)) AS demand_detail_id,
     tax_head_code,
-    argMax(tax_head_master_id, (lmt, ver)) AS tax_head_master_id,
     argMax(tax_amount, (lmt, ver)) AS tax_amount,
     argMax(collection_amount, (lmt, ver)) AS collection_amount,
-    argMax(tax_period_from, (lmt, ver)) AS tax_period_from,
-    argMax(tax_period_to, (lmt, ver)) AS tax_period_to,
+    argMax(created_by, (lmt, ver)) AS created_by,
+    argMax(created_time, (lmt, ver)) AS created_time,
+    argMax(last_modified_by, (lmt, ver)) AS last_modified_by,
     max(lmt) AS last_modified_time,
     max(ver) AS version
 FROM (

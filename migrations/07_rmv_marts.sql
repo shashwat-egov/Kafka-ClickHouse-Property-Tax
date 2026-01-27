@@ -195,6 +195,7 @@ INNER JOIN demand_detail_snapshot dd
     AND d.demand_id = dd.demand_id
 WHERE d.business_service = 'PT'
   AND dd.collection_amount > 0
+  AND dd.last_modified_time > toDateTime64('1970-01-01 00:00:00', 3)
 GROUP BY year_month;
 
 

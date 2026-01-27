@@ -13,6 +13,7 @@
 -- ----------------------------------------------------------------------------
 -- Property Snapshot
 -- Dedup Key: (tenant_id, property_id)
+-- Maps to eg_pt_property table
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS property_snapshot
 (
@@ -20,23 +21,27 @@ CREATE TABLE IF NOT EXISTS property_snapshot
     snapshot_date Date DEFAULT today(),
 
     -- Business Keys
+    id String,
     tenant_id LowCardinality(String),
     property_id String,
 
     -- Property Attributes
+    survey_id String,
+    account_id String,
+    old_property_id String,
     property_type LowCardinality(String),
     usage_category LowCardinality(String),
     ownership_category LowCardinality(String),
     status LowCardinality(String),
     acknowledgement_number String,
-    assessment_number String,
-    financial_year LowCardinality(String),
+    creation_reason LowCardinality(String),
+    no_of_floors Int8,
     source LowCardinality(String),
     channel LowCardinality(String),
 
     -- Land Info
-    land_area Decimal(18, 4),
-    land_area_unit LowCardinality(String),
+    land_area Decimal(10, 2),
+    super_built_up_area Decimal(10, 2),
 
     -- Audit Fields
     created_by String,
@@ -52,6 +57,7 @@ SETTINGS index_granularity = 8192;
 -- ----------------------------------------------------------------------------
 -- Unit Snapshot
 -- Dedup Key: (tenant_id, property_id, unit_id)
+-- Maps to eg_pt_unit table
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS unit_snapshot
 (
@@ -64,21 +70,32 @@ CREATE TABLE IF NOT EXISTS unit_snapshot
     unit_id String,
 
     -- Unit Attributes
-    floor_no LowCardinality(String),
+    floor_no Int8,
     unit_type LowCardinality(String),
     usage_category LowCardinality(String),
     occupancy_type LowCardinality(String),
     occupancy_date Date,
 
     -- Area Info
-    constructed_area Decimal(18, 4),
-    carpet_area Decimal(18, 4),
-    built_up_area Decimal(18, 4),
+    carpet_area Decimal(10, 2),
+    built_up_area Decimal(18, 2),
+    plinth_area Decimal(10, 2),
+    super_built_up_area Decimal(10, 2),
 
     -- ARV
-    arv_amount Decimal(18, 4),
+    arv Decimal(12, 2),
+
+    -- Construction Info
+    construction_type LowCardinality(String),
+    construction_date Int64,
+
+    -- Status
+    active UInt8,
 
     -- Audit Fields
+    created_by String,
+    created_time DateTime64(3),
+    last_modified_by String,
     last_modified_time DateTime64(3),
     version UInt64
 )
@@ -88,51 +105,45 @@ SETTINGS index_granularity = 8192;
 
 -- ----------------------------------------------------------------------------
 -- Owner Snapshot
--- Dedup Key: (tenant_id, property_id, owner_id)
+-- Dedup Key: (tenant_id, property_id, owner_info_uuid)
+-- Maps to eg_pt_owner table
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS owner_snapshot
 (
     -- Snapshot Metadata
     snapshot_date Date DEFAULT today(),
 
-    -- Business Keys
+    -- Business Keys (from eg_pt_owner)
     tenant_id LowCardinality(String),
     property_id String,
-    owner_id String,
+    owner_info_uuid String,
+    user_id String,
 
-    -- Owner Attributes
-    name String,
-    mobile_number String,
-    email String,
-    gender LowCardinality(String),
-    father_or_husband_name String,
-    relationship LowCardinality(String),
+    -- Owner Status
+    status LowCardinality(String),
+    is_primary_owner UInt8,
 
     -- Owner Type
     owner_type LowCardinality(String),
-    owner_info_uuid String,
+    ownership_percentage String,
     institution_id String,
-
-    -- Document Info
-    document_type LowCardinality(String),
-    document_uid String,
-
-    -- Ownership Details
-    ownership_percentage Decimal(5, 2),
-    is_primary_owner UInt8,
-    is_active UInt8,
+    relationship LowCardinality(String),
 
     -- Audit Fields
+    created_by String,
+    created_time DateTime64(3),
+    last_modified_by String,
     last_modified_time DateTime64(3),
     version UInt64
 )
 ENGINE = MergeTree
-ORDER BY (tenant_id, property_id, owner_id)
+ORDER BY (tenant_id, property_id, owner_info_uuid)
 SETTINGS index_granularity = 8192;
 
 -- ----------------------------------------------------------------------------
 -- Address Snapshot
 -- Dedup Key: (tenant_id, property_id)
+-- Maps to eg_pt_address table
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS address_snapshot
 (
@@ -146,10 +157,11 @@ CREATE TABLE IF NOT EXISTS address_snapshot
 
     -- Address Components
     door_no String,
+    plot_no String,
     building_name String,
     street String,
-    locality_code LowCardinality(String),
-    locality_name String,
+    landmark String,
+    locality LowCardinality(String),
     city LowCardinality(String),
     district LowCardinality(String),
     region LowCardinality(String),
@@ -158,10 +170,13 @@ CREATE TABLE IF NOT EXISTS address_snapshot
     pin_code LowCardinality(String),
 
     -- Geo Coordinates
-    latitude Decimal(10, 7),
+    latitude Decimal(9, 6),
     longitude Decimal(10, 7),
 
     -- Audit Fields
+    created_by String,
+    created_time DateTime64(3),
+    last_modified_by String,
     last_modified_time DateTime64(3),
     version UInt64
 )
@@ -172,6 +187,7 @@ SETTINGS index_granularity = 8192;
 -- ----------------------------------------------------------------------------
 -- Demand Snapshot
 -- Dedup Key: (tenant_id, demand_id)
+-- Maps to egbs_demand_v1 table
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS demand_snapshot
 (
@@ -187,10 +203,12 @@ CREATE TABLE IF NOT EXISTS demand_snapshot
     consumer_type LowCardinality(String),
     business_service LowCardinality(String),
 
+    -- Payer (single column as in PG)
+    payer String,
+
     -- Demand Period
     tax_period_from DateTime64(3),
     tax_period_to DateTime64(3),
-    billing_period LowCardinality(String),
 
     -- Status
     status LowCardinality(String),
@@ -202,10 +220,9 @@ CREATE TABLE IF NOT EXISTS demand_snapshot
     -- Amounts
     minimum_amount_payable Decimal(18, 4),
 
-    -- Payer Info
-    payer_name String,
-    payer_mobile String,
-    payer_email String,
+    -- Bill Expiry
+    bill_expiry_time Int64,
+    fixed_bill_expiry_date Int64,
 
     -- Audit Fields
     created_by String,
@@ -221,6 +238,7 @@ SETTINGS index_granularity = 8192;
 -- ----------------------------------------------------------------------------
 -- Demand Detail Snapshot
 -- Dedup Key: (tenant_id, demand_id, tax_head_code)
+-- Maps to egbs_demanddetail_v1 table
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS demand_detail_snapshot
 (
@@ -234,17 +252,15 @@ CREATE TABLE IF NOT EXISTS demand_detail_snapshot
 
     -- Tax Head Reference
     tax_head_code LowCardinality(String),
-    tax_head_master_id String,
 
     -- Amounts
-    tax_amount Decimal(18, 4),
-    collection_amount Decimal(18, 4),
-
-    -- Period
-    tax_period_from DateTime64(3),
-    tax_period_to DateTime64(3),
+    tax_amount Decimal(12, 2),
+    collection_amount Decimal(12, 2),
 
     -- Audit Fields
+    created_by String,
+    created_time DateTime64(3),
+    last_modified_by String,
     last_modified_time DateTime64(3),
     version UInt64
 )
