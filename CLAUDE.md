@@ -97,14 +97,14 @@ You MUST ensure:
 
 ## Dedup Keys
 
-| Entity | Dedup Key |
-|--------|-----------|
-| Property | `(tenant_id, property_id)` |
-| Unit | `(tenant_id, property_id, unit_id)` |
-| Owner | `(tenant_id, property_id, owner_id)` |
-| Address | `(tenant_id, property_id)` |
-| Demand | `(tenant_id, demand_id)` |
-| DemandDetail | `(tenant_id, demand_id, tax_head_code)` |
+| Entity | Dedup Key | PostgreSQL Table |
+|--------|-----------|------------------|
+| Property | `(tenant_id, property_id)` | `eg_pt_property` |
+| Unit | `(tenant_id, property_id, unit_id)` | `eg_pt_unit` |
+| Owner | `(tenant_id, property_id, owner_info_uuid)` | `eg_pt_owner` |
+| Address | `(tenant_id, property_id)` | `eg_pt_address` |
+| Demand | `(tenant_id, demand_id)` | `egbs_demand_v1` |
+| DemandDetail | `(tenant_id, demand_id, tax_head_code)` | `egbs_demanddetail_v1` |
 
 ## Core Pattern
 
