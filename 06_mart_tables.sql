@@ -9,7 +9,7 @@
 -- ############################################################################
 -- MART 1: Active Property Count + Ownership + Usage (Combined)
 -- ############################################################################
-CREATE TABLE IF NOT EXISTS mart_property_snapshot_agg
+CREATE TABLE IF NOT EXISTS punjab_kafka_test.mart_property_snapshot_agg
 (
     snapshot_date Date,
     tenant_id LowCardinality(String),
@@ -24,7 +24,7 @@ SETTINGS index_granularity = 8192;
 -- ############################################################################
 -- MART 2: New Property Count by Financial Year
 -- ############################################################################
-CREATE TABLE IF NOT EXISTS mart_new_properties_by_fy
+CREATE TABLE IF NOT EXISTS punjab_kafka_test.mart_new_properties_by_fy
 (
     snapshot_date Date,
     tenant_id LowCardinality(String),
@@ -38,7 +38,7 @@ SETTINGS index_granularity = 8192;
 -- ############################################################################
 -- MART 3: Properties with Demand Generated per Financial Year
 -- ############################################################################
-CREATE TABLE IF NOT EXISTS mart_properties_with_demand
+CREATE TABLE IF NOT EXISTS punjab_kafka_test.mart_properties_with_demand
 (
     snapshot_date Date,
     tenant_id LowCardinality(String),
@@ -52,7 +52,7 @@ SETTINGS index_granularity = 8192;
 -- ############################################################################
 -- MART 4: Demand Value by Financial Year (with tax head breakdown)
 -- ############################################################################
-CREATE TABLE IF NOT EXISTS mart_demand_value
+CREATE TABLE IF NOT EXISTS punjab_kafka_test.mart_demand_value
 (
     snapshot_date Date,
     tenant_id LowCardinality(String),
@@ -72,7 +72,7 @@ SETTINGS index_granularity = 8192;
 -- ############################################################################
 -- MART 5: Collections by Financial Year (with payment details)
 -- ############################################################################
-CREATE TABLE IF NOT EXISTS mart_property_collections
+CREATE TABLE IF NOT EXISTS punjab_kafka_test.mart_property_collections
 (
     snapshot_date Date,
     tenant_id LowCardinality(String),
@@ -95,7 +95,7 @@ SETTINGS index_granularity = 8192;
 -- ############################################################################
 -- MART 6: Month-wise Collections (Simple)
 -- ############################################################################
-CREATE TABLE IF NOT EXISTS mart_collections_by_month
+CREATE TABLE IF NOT EXISTS punjab_kafka_test.mart_collections_by_month
 (
     snapshot_date Date,
     year_month LowCardinality(String),
@@ -108,7 +108,7 @@ SETTINGS index_granularity = 8192;
 -- ############################################################################
 -- MART 7: Defaulter List with Details (per demand)
 -- ############################################################################
-CREATE TABLE IF NOT EXISTS mart_defaulters_details
+CREATE TABLE IF NOT EXISTS punjab_kafka_test.mart_defaulters_details
 (
     snapshot_date Date,
     tenant_id LowCardinality(String),
@@ -126,7 +126,7 @@ SETTINGS index_granularity = 8192;
 -- ############################################################################
 -- MART 8: Defaulter List (Aggregated by property)
 -- ############################################################################
-CREATE TABLE IF NOT EXISTS mart_defaulters
+CREATE TABLE IF NOT EXISTS punjab_kafka_test.mart_defaulters
 (
     snapshot_date Date,
     tenant_id LowCardinality(String),
