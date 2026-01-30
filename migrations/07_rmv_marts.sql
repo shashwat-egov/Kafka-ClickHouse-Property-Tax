@@ -13,10 +13,10 @@
 -- Mart 1: Active Property Count + Ownership + Usage
 -- Depends on: rmv_property_snapshot
 -- ############################################################################
-CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_mart_property_snapshot_agg
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_kafka_test.rmv_mart_property_snapshot_agg
 REFRESH EVERY 1 DAY OFFSET 1 HOUR 30 MINUTE
-DEPENDS ON rmv_property_snapshot
-TO mart_property_snapshot_agg
+DEPENDS ON punjab_kafka_test.rmv_property_snapshot
+TO punjab_kafka_test.mart_property_snapshot_agg
 EMPTY
 AS
 SELECT
@@ -25,7 +25,7 @@ SELECT
     ownership_category,
     usage_category,
     count() AS property_count
-FROM property_snapshot
+FROM punjab_kafka_test.property_snapshot
 WHERE status = 'ACTIVE'
 GROUP BY
     snapshot_date,
@@ -38,10 +38,10 @@ GROUP BY
 -- MART 2: New Property Count by Financial Year
 -- Depends On: rmv_property_snapshot
 -- ############################################################################
-CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_mart_new_properties_by_fy
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_kafka_test.rmv_mart_new_properties_by_fy
 REFRESH EVERY 1 DAY OFFSET 1 HOUR 30 MINUTE
-DEPENDS ON rmv_property_snapshot
-TO mart_new_properties_by_fy
+DEPENDS ON punjab_kafka_test.rmv_property_snapshot
+TO punjab_kafka_test.mart_new_properties_by_fy
 EMPTY
 AS
 SELECT
@@ -69,7 +69,7 @@ SELECT
         )
     ) AS financial_year,
     countDistinct(property_id) AS new_property_count
-FROM property_snapshot
+FROM punjab_kafka_test.property_snapshot
 WHERE created_time IS NOT NULL
 AND status = 'ACTIVE'
 GROUP BY
@@ -83,10 +83,10 @@ GROUP BY
 -- MART 3: Properties with Demand Generated per Financial Year
 -- Depends On: rmv_demand_snapshot
 -- ############################################################################
-CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_mart_properties_with_demand_by_fy
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_kafka_test.rmv_mart_properties_with_demand_by_fy
 REFRESH EVERY 1 DAY OFFSET 1 HOUR 30 MINUTE
-DEPENDS ON rmv_demand_snapshot
-TO mart_properties_with_demand
+DEPENDS ON punjab_kafka_test.rmv_demand_snapshot
+TO punjab_kafka_test.mart_properties_with_demand
 EMPTY
 AS
 SELECT
@@ -94,7 +94,7 @@ SELECT
     tenant_id,
     financial_year,
     uniqExact(consumer_code) AS properties_with_demand
-FROM demand_snapshot
+FROM punjab_kafka_test.demand_snapshot
 WHERE business_service = 'PT'
   AND financial_year != '' 
   AND status = 'ACTIVE'
@@ -108,10 +108,10 @@ GROUP BY
 -- MART 4: Demand Value by Financial Year
 -- Depends On: rmv_demand_snapshot, rmv_demand_detail_snapshot
 -- ############################################################################
-CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_mart_demand_value_by_fy
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_kafka_test.rmv_mart_demand_value_by_fy
 REFRESH EVERY 1 DAY OFFSET 1 HOUR 30 MINUTE
-DEPENDS ON rmv_demand_snapshot, rmv_demand_detail_snapshot
-TO mart_demand_value
+DEPENDS ON punjab_kafka_test.rmv_demand_snapshot, punjab_kafka_test.rmv_demand_detail_snapshot
+TO punjab_kafka_test.mart_demand_value
 EMPTY
 AS
 SELECT
@@ -127,8 +127,8 @@ SELECT
     sumIf(dd.tax_amount, dd.tax_head_code = 'PT_UNIT_USAGE_EXEMPTION')  AS pt_unit_usage_exemption,
 
     sum(dd.tax_amount) AS total_demand
-FROM demand_snapshot d
-LEFT JOIN demand_detail_snapshot dd
+FROM punjab_kafka_test.demand_snapshot d
+LEFT JOIN punjab_kafka_test.demand_detail_snapshot dd
     ON d.tenant_id = dd.tenant_id
    AND d.demand_id = dd.demand_id
 WHERE d.business_service = 'PT'
@@ -143,10 +143,10 @@ GROUP BY
 -- MART 5: Collections by financial year
 -- Depends On: rmv_demand_snapshot, rmv_demand_detail_snapshot
 -- ############################################################################
-CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_mart_property_collections
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_kafka_test.rmv_mart_property_collections
 REFRESH EVERY 1 DAY OFFSET 1 HOUR 30 MINUTE
-DEPENDS ON rmv_demand_snapshot, rmv_demand_detail_snapshot
-TO mart_property_collections
+DEPENDS ON punjab_kafka_test.rmv_demand_snapshot, punjab_kafka_test.rmv_demand_detail_snapshot
+TO punjab_kafka_test.mart_property_collections
 EMPTY
 AS
 SELECT
@@ -154,9 +154,6 @@ SELECT
     d.tenant_id,
     d.financial_year,
     toStartOfMonth(dd.last_modified_time) AS payment_month,
-
-    dd.collection_mode,
-    dd.collection_source,
 
     sumIf(dd.collection_amount, dd.tax_head_code = 'PT_TAX')          AS pt_tax_amount,
     sumIf(dd.collection_amount, dd.tax_head_code = 'PT_CANCER_CESS')    AS pt_cancer_cess,
@@ -166,8 +163,8 @@ SELECT
     sumIf(dd.collection_amount, dd.tax_head_code = 'PT_UNIT_USAGE_EXEMPTION')  AS pt_unit_usage_exemption,
 
     sum(dd.collection_amount) AS net_amount_collected
-FROM demand_snapshot d
-INNER JOIN demand_detail_snapshot dd
+FROM punjab_kafka_test.demand_snapshot d
+INNER JOIN punjab_kafka_test.demand_detail_snapshot dd
     ON d.tenant_id = dd.tenant_id
    AND d.demand_id = dd.demand_id
 WHERE d.business_service = 'PT'
@@ -177,27 +174,25 @@ GROUP BY
     d.snapshot_date,
     d.tenant_id,
     d.financial_year,
-    payment_month,
-    dd.collection_mode,
-    dd.collection_source;
+    payment_month;
 
 
 -- ############################################################################
 -- MART 6: Month-wise Collections
 -- Depends On: rmv_demand_snapshot, rmv_demand_detail_snapshot
 -- ############################################################################
-CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_mart_collections_by_month
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_kafka_test.rmv_mart_collections_by_month
 REFRESH EVERY 1 DAY OFFSET 1 HOUR 30 MINUTE
-DEPENDS ON rmv_demand_snapshot, rmv_demand_detail_snapshot
-TO mart_collections_by_month
+DEPENDS ON punjab_kafka_test.rmv_demand_snapshot, punjab_kafka_test.rmv_demand_detail_snapshot
+TO punjab_kafka_test.mart_collections_by_month
 EMPTY
 AS
 SELECT
     today() AS snapshot_date,
     formatDateTime(dd.last_modified_time, '%Y-%m') AS year_month,
     sum(dd.collection_amount) AS total_collected_amount
-FROM demand_snapshot d
-INNER JOIN demand_detail_snapshot dd
+FROM punjab_kafka_test.demand_snapshot d
+INNER JOIN punjab_kafka_test.demand_detail_snapshot dd
     ON d.tenant_id = dd.tenant_id
     AND d.demand_id = dd.demand_id
 WHERE d.business_service = 'PT'
@@ -212,10 +207,10 @@ GROUP BY year_month;
 -- Depends On: rmv_demand_snapshot, rmv_demand_detail_snapshot
 -- Columns : snapshot_date tenant_id property_id demand_id financial_year total_tax collected outstanding
 -- ############################################################################
-CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_mart_defaulters_details
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_kafka_test.rmv_mart_defaulters_details
 REFRESH EVERY 1 DAY OFFSET 1 HOUR 30 MINUTE
-DEPENDS ON rmv_demand_snapshot, rmv_demand_detail_snapshot
-TO mart_defaulters_details
+DEPENDS ON punjab_kafka_test.rmv_demand_snapshot, punjab_kafka_test.rmv_demand_detail_snapshot
+TO punjab_kafka_test.mart_defaulters_details
 EMPTY
 AS
 SELECT
@@ -227,8 +222,8 @@ SELECT
     sum(dd.tax_amount) AS total_tax_amount,
     sum(dd.collection_amount) AS total_collected_amount,
     sum(dd.tax_amount) - sum(dd.collection_amount) AS outstanding_amount
-FROM demand_snapshot d
-INNER JOIN demand_detail_snapshot dd
+FROM punjab_kafka_test.demand_snapshot d
+INNER JOIN punjab_kafka_test.demand_detail_snapshot dd
     ON d.tenant_id = dd.tenant_id
     AND d.demand_id = dd.demand_id
 WHERE d.business_service = 'PT'
@@ -242,10 +237,10 @@ HAVING outstanding_amount > 0;
 -- Depends On: rmv_demand_snapshot, rmv_demand_detail_snapshot
 -- Columns : snapshot_date tenant_id property_id due_fy_count total_outstanding
 -- ############################################################################
-CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_mart_defaulters
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_kafka_test.rmv_mart_defaulters
 REFRESH EVERY 1 DAY OFFSET 1 HOUR 30 MINUTE
-DEPENDS ON rmv_demand_snapshot, rmv_demand_detail_snapshot
-TO mart_defaulters
+DEPENDS ON punjab_kafka_test.rmv_demand_snapshot, punjab_kafka_test.rmv_demand_detail_snapshot
+TO punjab_kafka_test.mart_defaulters
 EMPTY
 AS
 WITH fy_dues AS (
@@ -255,8 +250,8 @@ WITH fy_dues AS (
         d.consumer_code AS property_id,
         d.financial_year,
         sum(dd.tax_amount) - sum(dd.collection_amount) AS outstanding
-    FROM demand_snapshot d
-    INNER JOIN demand_detail_snapshot dd
+    FROM punjab_kafka_test.demand_snapshot d
+    INNER JOIN punjab_kafka_test.demand_detail_snapshot dd
         ON d.tenant_id = dd.tenant_id
        AND d.demand_id = dd.demand_id
     WHERE d.business_service = 'PT'
