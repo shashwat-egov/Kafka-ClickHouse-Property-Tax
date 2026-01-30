@@ -13,8 +13,8 @@
 -- Extracts the property object from the JSON payload
 -- Maps to eg_pt_property table
 -- ----------------------------------------------------------------------------
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_property_raw
-TO property_raw
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_kafka_test.mv_property_raw
+TO punjab_kafka_test.property_raw
 AS
 SELECT
     now64(3) AS event_time,
@@ -51,7 +51,7 @@ SELECT
     -- Version
     JSONExtractUInt(raw, 'property', 'version') AS version
 
-FROM kafka_property_events
+FROM punjab_kafka_test.kafka_property_events
 WHERE JSONExtractString(raw, 'property', 'propertyId') != '';
 
 -- ----------------------------------------------------------------------------
@@ -59,8 +59,8 @@ WHERE JSONExtractString(raw, 'property', 'propertyId') != '';
 -- Flattens the units[] array from each property event
 -- Maps to eg_pt_unit table
 -- ----------------------------------------------------------------------------
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_unit_raw
-TO unit_raw
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_kafka_test.mv_unit_raw
+TO punjab_kafka_test.unit_raw
 AS
 SELECT
     now64(3) AS event_time,
@@ -102,7 +102,7 @@ SELECT
     -- Version
     JSONExtractUInt(raw, 'property', 'version') AS version
 
-FROM kafka_property_events
+FROM punjab_kafka_test.kafka_property_events
 ARRAY JOIN JSONExtractArrayRaw(raw, 'property', 'units') AS unit
 WHERE JSONExtractString(raw, 'property', 'propertyId') != ''
   AND JSONExtractString(unit, 'id') != '';
@@ -112,8 +112,8 @@ WHERE JSONExtractString(raw, 'property', 'propertyId') != ''
 -- Flattens the owners[] array from each property event
 -- Maps to eg_pt_owner table
 -- ----------------------------------------------------------------------------
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_owner_raw
-TO owner_raw
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_kafka_test.mv_owner_raw
+TO punjab_kafka_test.owner_raw
 AS
 SELECT
     now64(3) AS event_time,
@@ -143,7 +143,7 @@ SELECT
     -- Version
     JSONExtractUInt(raw, 'property', 'version') AS version
 
-FROM kafka_property_events
+FROM punjab_kafka_test.kafka_property_events
 ARRAY JOIN JSONExtractArrayRaw(raw, 'property', 'owners') AS owner
 WHERE JSONExtractString(raw, 'property', 'propertyId') != ''
   AND JSONExtractString(owner, 'ownerInfoUuid') != '';
@@ -153,8 +153,8 @@ WHERE JSONExtractString(raw, 'property', 'propertyId') != ''
 -- Extracts the address object from each property event
 -- Maps to eg_pt_address table
 -- ----------------------------------------------------------------------------
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_address_raw
-TO address_raw
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_kafka_test.mv_address_raw
+TO punjab_kafka_test.address_raw
 AS
 SELECT
     now64(3) AS event_time,
@@ -191,7 +191,7 @@ SELECT
     -- Version
     JSONExtractUInt(raw, 'property', 'version') AS version
 
-FROM kafka_property_events
+FROM punjab_kafka_test.kafka_property_events
 WHERE JSONExtractString(raw, 'property', 'propertyId') != '';
 
 -- ----------------------------------------------------------------------------
@@ -199,8 +199,8 @@ WHERE JSONExtractString(raw, 'property', 'propertyId') != '';
 -- Extracts the demand object from each demand event
 -- Maps to egbs_demand_v1 table
 -- ----------------------------------------------------------------------------
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_demand_raw
-TO demand_raw
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_kafka_test.mv_demand_raw
+TO punjab_kafka_test.demand_raw
 AS
 SELECT
     now64(3) AS event_time,
@@ -255,7 +255,7 @@ SELECT
     -- Version
     JSONExtractUInt(raw, 'demand', 'version') AS version
 
-FROM kafka_demand_events
+FROM punjab_kafka_test.kafka_demand_events
 WHERE JSONExtractString(raw, 'demand', 'id') != '';
 
 -- ----------------------------------------------------------------------------
@@ -263,8 +263,8 @@ WHERE JSONExtractString(raw, 'demand', 'id') != '';
 -- Flattens the demandDetails[] array from each demand event
 -- Maps to egbs_demanddetail_v1 table
 -- ----------------------------------------------------------------------------
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_demand_detail_raw
-TO demand_detail_raw
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_kafka_test.mv_demand_detail_raw
+TO punjab_kafka_test.demand_detail_raw
 AS
 SELECT
     now64(3) AS event_time,
@@ -290,7 +290,7 @@ SELECT
     -- Version
     JSONExtractUInt(raw, 'demand', 'version') AS version
 
-FROM kafka_demand_events
+FROM punjab_kafka_test.kafka_demand_events
 ARRAY JOIN JSONExtractArrayRaw(raw, 'demand', 'demandDetails') AS detail
 WHERE JSONExtractString(raw, 'demand', 'id') != ''
   AND JSONExtractString(detail, 'taxHeadCode') != '';
