@@ -1,155 +1,95 @@
-# CLAUDE.md
+# Property Tax Analytics Pipeline
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Append-only analytical pipeline using ClickHouse with streaming aggregation for memory-efficient processing at scale.
 
-## Project Overview
+## Quick Start
 
-This is an append-only analytical pipeline for Property Tax data using ClickHouse with native Refreshable Materialized Views (RMVs) for automated refresh orchestration. Data flows from PostgreSQL through Kafka into ClickHouse, with daily RMV-scheduled snapshot refreshes that power analytical marts.
-
-## Commands
-
-### Quick Start (Docker)
 ```bash
-cd docker && docker compose up -d   # Start infrastructure
-./scripts/setup.sh                  # Or use setup script for full setup
-./scripts/run_demo.sh               # Run end-to-end demo
-```
-
-### Deploy DDLs (execute in order)
-```bash
-clickhouse-client < 01_kafka_tables.sql
-clickhouse-client < 02_raw_tables.sql
-clickhouse-client < 03_materialized_views.sql
-clickhouse-client < 04_snapshot_tables.sql
-clickhouse-client < 06_mart_tables.sql
-clickhouse-client < migrations/05_rmv_snapshots.sql
-clickhouse-client < migrations/07_rmv_marts.sql
-```
-
-### RMV Manual Refresh
-```sql
--- Refresh snapshots first
-SYSTEM REFRESH VIEW rmv_property_snapshot;
-SYSTEM REFRESH VIEW rmv_demand_snapshot;
-SYSTEM REFRESH VIEW rmv_demand_detail_snapshot;
-
--- Marts auto-refresh via DEPENDS ON, or manually:
-SYSTEM REFRESH VIEW rmv_mart_defaulters;
-
--- Check status
-SELECT view, status, last_success_time
-FROM system.view_refreshes WHERE view LIKE 'rmv_%';
-```
-
-### Test Data Generation
-```bash
-cd test-data
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-python generate_properties.py  # 10K properties
-python generate_demands.py     # 70K demands
-python generate_updates.py     # Update scenarios
+cd docker && docker compose up -d
+./scripts/deploy.sh
+./scripts/backfill.sh  # Only if migrating existing data
 ```
 
 ## Architecture
 
 ```
-PostgreSQL → Kafka → ClickHouse Raw → [RMV auto] → Snapshots → Marts
-                          ↑                              ↑
-                     (Append-Only)                 (DEPENDS ON)
+Kafka → Ingestion MVs → Raw Tables → Streaming MVs → AggregatingMergeTree → Views
+           ↓                              ↓
+    (JSON parsing)              (argMaxState per key)
 ```
 
-**Data flow:**
-1. **Continuous**: Kafka topics → Kafka engine tables → Materialized Views → Raw tables
-2. **Daily (01:00 AM)**: RMVs refresh Snapshots → DEPENDS ON triggers Marts (01:30 AM)
-
-## Refreshable Materialized Views (RMVs)
-
-### Snapshot RMVs (01:00 AM)
-| RMV | Target Table |
-|-----|--------------|
-| `rmv_property_snapshot` | `property_snapshot` |
-| `rmv_unit_snapshot` | `unit_snapshot` |
-| `rmv_owner_snapshot` | `owner_snapshot` |
-| `rmv_address_snapshot` | `address_snapshot` |
-| `rmv_demand_snapshot` | `demand_snapshot` |
-| `rmv_demand_detail_snapshot` | `demand_detail_snapshot` |
-
-### Mart RMVs (01:30 AM, via DEPENDS ON)
-| RMV | Depends On |
-|-----|------------|
-| `rmv_mart_property_count_by_tenant` | `rmv_property_snapshot` |
-| `rmv_mart_defaulters` | `rmv_demand_snapshot`, `rmv_demand_detail_snapshot` |
-
-## Non-Negotiable Constraints
-
-When modifying this codebase, you MUST NOT:
-- Use UPDATE or DELETE statements
-- Use FINAL clause
-- Use ReplacingMergeTree engine
-- Parse JSON in analytical queries (only in MVs)
-
-You MUST ensure:
-- All tables are append-only MergeTree
-- Deduplication uses `argMax(column, (lmt, ver))` with subquery aliasing
-- RMVs use `EMPTY` clause to prevent refresh on DDL deploy
-- Marts use `DEPENDS ON` for dependency ordering
-
-## Dedup Keys
-
-| Entity | Dedup Key | PostgreSQL Table |
-|--------|-----------|------------------|
-| Property | `(tenant_id, property_id)` | `eg_pt_property` |
-| Unit | `(tenant_id, property_id, unit_id)` | `eg_pt_unit` |
-| Owner | `(tenant_id, property_id, owner_info_uuid)` | `eg_pt_owner` |
-| Address | `(tenant_id, property_id)` | `eg_pt_address` |
-| Demand | `(tenant_id, demand_id)` | `egbs_demand_v1` |
-| DemandDetail | `(tenant_id, demand_id, tax_head_code)` | `egbs_demanddetail_v1` |
-
-## Core Pattern
-
-Updates are new facts, not mutations. Latest fact wins via argMax with subquery aliasing to avoid cyclic references:
-
-```sql
-SELECT
-    tenant_id,
-    property_id,
-    argMax(status, (lmt, ver)) AS status,
-    max(lmt) AS last_modified_time,
-    max(ver) AS version
-FROM (
-    SELECT *, last_modified_time AS lmt, version AS ver
-    FROM property_raw
-)
-GROUP BY tenant_id, property_id;
-```
+**Key insight**: Deduplication happens at insert-time, not query-time. Memory usage is O(unique keys), not O(total rows).
 
 ## File Structure
 
 ```
 ch-experiment/
+├── ddl/
+│   ├── 01_kafka.sql              # Kafka engine tables
+│   ├── 02_raw_tables.sql         # Append-only raw tables
+│   ├── 03_ingestion_mvs.sql      # Kafka → Raw MVs
+│   ├── 04_property_snapshots.sql # Property batch snapshots (small tables)
+│   ├── 05_demand_streaming.sql   # Demand streaming aggregation
+│   └── 06_marts.sql              # Analytical marts/views
 ├── docker/
-│   └── docker-compose.yml           # ClickHouse + Kafka + Zookeeper
-├── migrations/
-│   ├── 05_rmv_snapshots.sql         # RMV definitions for snapshots
-│   └── 07_rmv_marts.sql             # RMV definitions for marts
-├── test-data/
-│   ├── generate_properties.py       # 10K property events
-│   ├── generate_demands.py          # 70K demand events
-│   ├── generate_updates.py          # Update scenarios
-│   └── requirements.txt
-├── verification/
-│   ├── verify_deduplication.sql     # Verify argMax works
-│   ├── verify_payment_flow.sql      # Verify collection updates
-│   └── verify_rmv_status.sql        # Check RMV refresh status
+│   └── docker-compose.yml
 ├── scripts/
-│   ├── setup.sh                     # Full environment setup
-│   └── run_demo.sh                  # End-to-end demo
-├── 01_kafka_tables.sql
-├── 02_raw_tables.sql
-├── 03_materialized_views.sql
-├── 04_snapshot_tables.sql
-├── 06_mart_tables.sql
-├── 11_update_handling_semantics.md
+│   ├── deploy.sh                 # Deploy all DDLs
+│   └── backfill.sh               # Migrate existing data
+├── test-data/
+│   └── generate_*.py
 └── CLAUDE.md
+```
+
+## Tables
+
+| Table | Engine | Purpose |
+|-------|--------|---------|
+| `demand_with_details_raw` | MergeTree | Denormalized demand+details (no JOIN) |
+| `agg_demand_detail_latest` | AggregatingMergeTree | Streaming dedup via argMaxState |
+| `v_demand_detail_current` | View | Deduplicated current state |
+| `v_mart_*` | Views | Analytical marts (instant reads) |
+| `property_snapshot` | MergeTree | Batch RMV target (small table) |
+
+## Constraints
+
+**MUST NOT:**
+- Use UPDATE or DELETE
+- Use FINAL clause
+- Parse JSON in queries (only in ingestion MVs)
+
+**MUST:**
+- Keep raw tables append-only
+- Use `argMaxState` for streaming dedup
+- Use `argMax(col, (last_modified_time, version))` pattern
+
+## Dedup Keys
+
+| Entity | Key |
+|--------|-----|
+| Property | `(tenant_id, property_id)` |
+| DemandDetail | `(tenant_id, demand_id, tax_head_code)` |
+
+## Core Pattern
+
+```sql
+-- Streaming: Store state at insert time
+CREATE MATERIALIZED VIEW mv_agg TO agg_table AS
+SELECT
+    tenant_id, demand_id, tax_head_code,
+    argMaxState(amount, (last_modified_time, version)) AS amount_state
+FROM raw_table
+GROUP BY tenant_id, demand_id, tax_head_code;
+
+-- Query: Finalize state instantly
+SELECT argMaxMerge(amount_state) AS amount
+FROM agg_table
+GROUP BY tenant_id, demand_id, tax_head_code;
+```
+
+## Manual Refresh (Property Snapshots)
+
+```sql
+SYSTEM REFRESH VIEW rmv_property_snapshot;
+SELECT view, status FROM system.view_refreshes WHERE view LIKE 'rmv_%';
 ```
