@@ -78,7 +78,13 @@ PostgreSQL → Kafka → ClickHouse Raw → [RMV auto] → Snapshots → Marts
 ### Mart RMVs (01:30 AM, via DEPENDS ON)
 | RMV | Depends On |
 |-----|------------|
-| `rmv_mart_property_count_by_tenant` | `rmv_property_snapshot` |
+| `rmv_mart_property_snapshot_agg` | `rmv_property_snapshot` |
+| `rmv_mart_new_properties_by_fy` | `rmv_property_snapshot` |
+| `rmv_mart_properties_with_demand_by_fy` | `rmv_demand_snapshot` |
+| `rmv_mart_demand_value_by_fy` | `rmv_demand_snapshot`, `rmv_demand_detail_snapshot` |
+| `rmv_mart_property_collections` | `rmv_demand_snapshot`, `rmv_demand_detail_snapshot` |
+| `rmv_mart_collections_by_month` | `rmv_demand_snapshot`, `rmv_demand_detail_snapshot` |
+| `rmv_mart_defaulters_details` | `rmv_demand_snapshot`, `rmv_demand_detail_snapshot` |
 | `rmv_mart_defaulters` | `rmv_demand_snapshot`, `rmv_demand_detail_snapshot` |
 
 ## Non-Negotiable Constraints
@@ -123,6 +129,14 @@ FROM (
 )
 GROUP BY tenant_id, property_id;
 ```
+
+**Why subquery aliasing?** Using `argMax(status, (last_modified_time, version))` directly causes cyclic reference errors in ClickHouse. The subquery creates aliases `lmt` and `ver` that break this cycle.
+
+## Database & Schema
+
+- **Database**: `punjab_kafka_test` (used in mart RMVs)
+- **Default database**: `default` (used for raw/snapshot tables)
+- Requires ClickHouse 24.10+ for RMV with `DEPENDS ON` support
 
 ## File Structure
 
