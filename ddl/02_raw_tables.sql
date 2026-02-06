@@ -138,7 +138,7 @@ SETTINGS index_granularity = 8192;
 -- Demand + DemandDetails combined to avoid JOINs
 -- Each row = one demand_detail with parent demand attributes embedded
 
-CREATE TABLE IF NOT EXISTS demand_with_details_raw
+CREATE TABLE IF NOT EXISTS punjab_kafka_test.demand_with_details_raw
 (
     event_time DateTime64(3) DEFAULT now64(3),
 
@@ -162,11 +162,18 @@ CREATE TABLE IF NOT EXISTS demand_with_details_raw
 
     -- Demand detail keys
     demand_detail_id String,
-    tax_head_code LowCardinality(String),
 
     -- Amounts
-    tax_amount Decimal(12, 2),
-    collection_amount Decimal(12, 2),
+    total_tax_amount Decimal(12, 2),
+    total_collection_amount Decimal(12, 2),
+
+
+    pt_tax Decimal(18,4),
+    pt_cancer_cess Decimal(18,4),
+    pt_fire_cess Decimal(18,4),
+    pt_roundoff Decimal(18,4),
+    pt_owner_exemption Decimal(18,4),
+    pt_unit_usage_exemption Decimal(18,4),
 
     -- Audit
     created_by String,
@@ -177,5 +184,5 @@ CREATE TABLE IF NOT EXISTS demand_with_details_raw
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(last_modified_time)
-ORDER BY (tenant_id, demand_id, tax_head_code, last_modified_time)
+ORDER BY (tenant_id, demand_id, last_modified_time)
 SETTINGS index_granularity = 8192;
