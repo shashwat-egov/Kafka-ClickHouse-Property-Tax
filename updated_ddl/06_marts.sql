@@ -1,119 +1,9 @@
 -- ============================================================================
 -- ANALYTICAL MARTS (Refreshable Materialized Views)
 -- ============================================================================
--- Mart tables + RMVs that refresh daily at 02:00 AM (after the 01:30 AM DAG).
--- RMVs re-execute the full query against CollapsingMergeTree silver tables.
---
--- Pattern:
---   Inner subquery: GROUP BY sort_key HAVING sum(sign) > 0  →  one row per live entity
---   Outer query:    WHERE filters + aggregation across entities
---
--- Target tables use ReplacingMergeTree(snapshot_date) so each daily refresh
--- replaces the previous snapshot.
+-- Mart tables + MVs that refresh daily after the DAG's successful execution.
+-- MVs re-executed the full query against CollapsingMergeTree silver tables.
 -- ============================================================================
-
-
--- ############################################################################
--- PROPERTY MART TABLES
--- ############################################################################
-
-CREATE TABLE IF NOT EXISTS collapsing_test.mart_property_count_by_tenant
-(
-    snapshot_date Date,
-    tenant_id LowCardinality(String),
-    property_count UInt64
-)
-ENGINE = MergeTree
-ORDER BY (tenant_id)
-SETTINGS index_granularity = 8192;
-
-
-CREATE TABLE IF NOT EXISTS collapsing_test.mart_property_count_by_usage
-(
-    snapshot_date Date,
-    tenant_id LowCardinality(String),
-    usage_category LowCardinality(String),
-    property_count UInt64
-)
-ENGINE = MergeTree
-ORDER BY (tenant_id, usage_category)
-SETTINGS index_granularity = 8192;
-
-
-CREATE TABLE IF NOT EXISTS collapsing_test.mart_property_count_by_ownership
-(
-    snapshot_date Date,
-    tenant_id LowCardinality(String),
-    ownership_category LowCardinality(String),
-    property_count UInt64
-)
-ENGINE = MergeTree
-ORDER BY (tenant_id, ownership_category)
-SETTINGS index_granularity = 8192;
-
-
--- ############################################################################
--- DEMAND MART TABLES
--- ############################################################################
-
-CREATE TABLE IF NOT EXISTS collapsing_test.mart_demand_value_by_fy
-(
-    snapshot_date Date,
-    financial_year LowCardinality(String),
-    total_demand_amount Decimal(18, 2)
-)
-ENGINE = MergeTree
-ORDER BY (financial_year)
-SETTINGS index_granularity = 8192;
-
-
-CREATE TABLE IF NOT EXISTS collapsing_test.mart_collections_by_fy
-(
-    snapshot_date Date,
-    financial_year LowCardinality(String),
-    total_collected_amount Decimal(18, 2)
-)
-ENGINE = MergeTree
-ORDER BY (financial_year)
-SETTINGS index_granularity = 8192;
-
-
-CREATE TABLE IF NOT EXISTS collapsing_test.mart_collections_by_month
-(
-    snapshot_date Date,
-    year_month String,
-    total_collected_amount Decimal(18, 2)
-)
-ENGINE = MergeTree
-ORDER BY (year_month)
-SETTINGS index_granularity = 8192;
-
-
-CREATE TABLE IF NOT EXISTS collapsing_test.mart_properties_with_demand_by_fy
-(
-    snapshot_date Date,
-    financial_year LowCardinality(String),
-    properties_with_demand UInt64
-)
-ENGINE = MergeTree
-ORDER BY (financial_year)
-SETTINGS index_granularity = 8192;
-
-
-CREATE TABLE IF NOT EXISTS collapsing_test.mart_defaulters
-(
-    snapshot_date Date,
-    tenant_id LowCardinality(String),
-    property_id String,
-    demand_id String,
-    financial_year LowCardinality(String),
-    total_tax_amount Decimal(12, 2),
-    total_collection_amount Decimal(12, 2),
-    outstanding_amount Decimal(12, 2)
-)
-ENGINE = MergeTree
-ORDER BY (tenant_id, demand_id)
-SETTINGS index_granularity = 8192;
 
 
 -- ############################################################################
@@ -121,7 +11,6 @@ SETTINGS index_granularity = 8192;
 -- ############################################################################
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_property_count_by_tenant
-REFRESH EVERY 1 DAY OFFSET 2 HOUR
 TO collapsing_test.mart_property_count_by_tenant
 EMPTY
 AS
@@ -141,7 +30,6 @@ GROUP BY tenant_id;
 
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_property_count_by_usage
-REFRESH EVERY 1 DAY OFFSET 2 HOUR
 TO collapsing_test.mart_property_count_by_usage
 EMPTY
 AS
@@ -164,7 +52,6 @@ GROUP BY tenant_id, usage_category;
 
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_property_count_by_ownership
-REFRESH EVERY 1 DAY OFFSET 2 HOUR
 TO collapsing_test.mart_property_count_by_ownership
 EMPTY
 AS
@@ -191,7 +78,6 @@ GROUP BY tenant_id, ownership_category;
 -- ############################################################################
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_demand_value_by_fy
-REFRESH EVERY 1 DAY OFFSET 2 HOUR
 TO collapsing_test.mart_demand_value_by_fy
 EMPTY
 AS
@@ -215,7 +101,6 @@ GROUP BY financial_year;
 
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_collections_by_fy
-REFRESH EVERY 1 DAY OFFSET 2 HOUR
 TO collapsing_test.mart_collections_by_fy
 EMPTY
 AS
@@ -239,7 +124,6 @@ GROUP BY financial_year;
 
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_collections_by_month
-REFRESH EVERY 1 DAY OFFSET 2 HOUR
 TO collapsing_test.mart_collections_by_month
 EMPTY
 AS
@@ -264,7 +148,6 @@ GROUP BY year_month;
 
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_properties_with_demand_by_fy
-REFRESH EVERY 1 DAY OFFSET 2 HOUR
 TO collapsing_test.mart_properties_with_demand_by_fy
 EMPTY
 AS
@@ -288,7 +171,6 @@ GROUP BY financial_year;
 
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_defaulters
-REFRESH EVERY 1 DAY OFFSET 2 HOUR
 TO collapsing_test.mart_defaulters
 EMPTY
 AS
