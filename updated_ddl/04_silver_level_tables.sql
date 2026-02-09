@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS collapsing_test.property_address_collapsing
+CREATE TABLE IF NOT EXISTS collapsing_test.property_address_fact
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -54,7 +54,7 @@ SETTINGS index_granularity = 8192;
 
 
 
-CREATE TABLE IF NOT EXISTS collapsing_test.unit_collapsing
+CREATE TABLE IF NOT EXISTS collapsing_test.property_unit_fact
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -103,7 +103,7 @@ SETTINGS index_granularity = 8192;
 
 
 
-CREATE TABLE IF NOT EXISTS collapsing_test.owner_collapsing
+CREATE TABLE IF NOT EXISTS collapsing_test.property_owner_collapsing
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -143,7 +143,7 @@ ORDER BY (tenant_id, owner_info_uuid)
 SETTINGS index_granularity = 8192;
 
 
-CREATE TABLE IF NOT EXISTS collapsing_test.demand_with_details_collapsing
+CREATE TABLE IF NOT EXISTS collapsing_test.demand_with_details_fact
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
