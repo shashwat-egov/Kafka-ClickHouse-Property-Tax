@@ -10,15 +10,15 @@
 
 -- Property Events: Kafka → property_events_raw
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.mv_property_events_raw
-TO property_events_raw
+TO collapsing_test.property_events_raw
 AS
 SELECT raw
-FROM kafka_property_events;
+FROM collapsing_test.kafka_property_events;
 
 
 -- Demand Events: Kafka → demand_events_raw
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.mv_demand_events_raw
-TO demand_events_raw
+TO collapsing_test.demand_events_raw
 AS
 SELECT raw
-FROM kafka_demand_events;
+FROM collapsing_test.kafka_demand_events;
