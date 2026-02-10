@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS collapsing_test.property_events_raw
     raw String
 )
 ENGINE = MergeTree
-PARTITION BY toYYYY(event_time)
+PARTITION BY toYYYYMM(event_time)
 ORDER BY event_time
 SETTINGS index_granularity = 8192;
 
@@ -34,6 +34,6 @@ CREATE TABLE IF NOT EXISTS collapsing_test.demand_events_raw
     raw String
 )
 ENGINE = MergeTree
-PARTITION BY toYYYY(event_time)
+PARTITION BY toYYYYMM(event_time)
 ORDER BY event_time
 SETTINGS index_granularity = 8192;

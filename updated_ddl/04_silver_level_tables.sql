@@ -103,7 +103,7 @@ SETTINGS index_granularity = 8192;
 
 
 
-CREATE TABLE IF NOT EXISTS collapsing_test.property_owner_collapsing
+CREATE TABLE IF NOT EXISTS collapsing_test.property_owner_fact
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),

@@ -11,8 +11,8 @@
 -- ############################################################################
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_property_count_by_tenant
+REFRESH EVERY 1000 YEAR
 TO collapsing_test.mart_property_count_by_tenant
-EMPTY
 AS
 SELECT
     today() AS snapshot_date,
@@ -21,7 +21,7 @@ SELECT
 FROM
 (
     SELECT tenant_id, property_id, any(status) AS status
-    FROM collapsing_test.property_address_collapsing
+    FROM collapsing_test.property_address_fact
     GROUP BY tenant_id, property_id
     HAVING sum(sign) > 0
 )
@@ -30,8 +30,8 @@ GROUP BY tenant_id;
 
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_property_count_by_usage
+REFRESH EVERY 1000 YEAR
 TO collapsing_test.mart_property_count_by_usage
-EMPTY
 AS
 SELECT
     today() AS snapshot_date,
@@ -43,7 +43,7 @@ FROM
     SELECT tenant_id, property_id,
            any(status) AS status,
            any(usage_category) AS usage_category
-    FROM collapsing_test.property_address_collapsing
+    FROM collapsing_test.property_address_fact
     GROUP BY tenant_id, property_id
     HAVING sum(sign) > 0
 )
@@ -52,8 +52,8 @@ GROUP BY tenant_id, usage_category;
 
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_property_count_by_ownership
+REFRESH EVERY 1000 YEAR
 TO collapsing_test.mart_property_count_by_ownership
-EMPTY
 AS
 SELECT
     today() AS snapshot_date,
@@ -65,7 +65,7 @@ FROM
     SELECT tenant_id, property_id,
            any(status) AS status,
            any(ownership_category) AS ownership_category
-    FROM collapsing_test.property_address_collapsing
+    FROM collapsing_test.property_address_fact
     GROUP BY tenant_id, property_id
     HAVING sum(sign) > 0
 )
@@ -78,8 +78,8 @@ GROUP BY tenant_id, ownership_category;
 -- ############################################################################
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_demand_value_by_fy
+REFRESH EVERY 1000 YEAR
 TO collapsing_test.mart_demand_value_by_fy
-EMPTY
 AS
 SELECT
     today() AS snapshot_date,
@@ -91,7 +91,7 @@ FROM
            any(business_service) AS business_service,
            any(financial_year) AS financial_year,
            sum(total_tax_amount * sign) AS total_tax_amount
-    FROM collapsing_test.demand_with_details_collapsing
+    FROM collapsing_test.demand_with_details_fact
     GROUP BY tenant_id, demand_id
     HAVING sum(sign) > 0
 )
@@ -101,8 +101,8 @@ GROUP BY financial_year;
 
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_collections_by_fy
+REFRESH EVERY 1000 YEAR
 TO collapsing_test.mart_collections_by_fy
-EMPTY
 AS
 SELECT
     today() AS snapshot_date,
@@ -114,7 +114,7 @@ FROM
            any(business_service) AS business_service,
            any(financial_year) AS financial_year,
            sum(total_collection_amount * sign) AS total_collection_amount
-    FROM collapsing_test.demand_with_details_collapsing
+    FROM collapsing_test.demand_with_details_fact
     GROUP BY tenant_id, demand_id
     HAVING sum(sign) > 0
 )
@@ -122,10 +122,10 @@ WHERE business_service = 'PT'
   AND financial_year != ''
 GROUP BY financial_year;
 
-
+-- group by fy instead of demand id
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_collections_by_month
+REFRESH EVERY 1000 YEAR
 TO collapsing_test.mart_collections_by_month
-EMPTY
 AS
 SELECT
     today() AS snapshot_date,
@@ -137,7 +137,7 @@ FROM
            any(business_service) AS business_service,
            formatDateTime(any(last_modified_time), '%Y-%m') AS year_month,
            sum(total_collection_amount * sign) AS total_collection_amount
-    FROM collapsing_test.demand_with_details_collapsing
+    FROM collapsing_test.demand_with_details_fact
     GROUP BY tenant_id, demand_id
     HAVING sum(sign) > 0
 )
@@ -148,8 +148,8 @@ GROUP BY year_month;
 
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_properties_with_demand_by_fy
+REFRESH EVERY 1000 YEAR
 TO collapsing_test.mart_properties_with_demand_by_fy
-EMPTY
 AS
 SELECT
     today() AS snapshot_date,
@@ -161,7 +161,7 @@ FROM
            any(business_service) AS business_service,
            any(financial_year) AS financial_year,
            any(consumer_code) AS consumer_code
-    FROM collapsing_test.demand_with_details_collapsing
+    FROM collapsing_test.demand_with_details_fact
     GROUP BY tenant_id, demand_id
     HAVING sum(sign) > 0
 )
@@ -171,8 +171,8 @@ GROUP BY financial_year;
 
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_defaulters
+REFRESH EVERY 1000 YEAR
 TO collapsing_test.mart_defaulters
-EMPTY
 AS
 SELECT
     today() AS snapshot_date,
@@ -191,7 +191,7 @@ FROM
            any(financial_year) AS financial_year,
            sum(total_tax_amount * sign) AS total_tax_amount,
            sum(total_collection_amount * sign) AS total_collection_amount
-    FROM collapsing_test.demand_with_details_collapsing
+    FROM collapsing_test.demand_with_details_fact
     GROUP BY tenant_id, demand_id
     HAVING sum(sign) > 0
 )
