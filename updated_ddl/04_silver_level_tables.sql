@@ -178,6 +178,10 @@ CREATE TABLE IF NOT EXISTS collapsing_test.demand_with_details_fact
     pt_owner_exemption Decimal(18,4),
     pt_unit_usage_exemption Decimal(18,4),
 
+    -- Derived columns
+    outstanding_amount Decimal(18, 4),
+    is_paid UInt8,
+
     -- Audit details
     created_by String,
     created_time DateTime64(3),

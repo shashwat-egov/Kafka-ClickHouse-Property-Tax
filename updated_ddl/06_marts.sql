@@ -1,18 +1,24 @@
 -- ============================================================================
 -- ANALYTICAL MARTS (Refreshable Materialized Views)
 -- ============================================================================
--- Mart tables + MVs that refresh daily after the DAG's successful execution.
--- MVs re-executed the full query against CollapsingMergeTree silver tables.
+-- Mart RMVs that are manually refreshed after all silver-layer inserts complete.
+-- MVs re-execute the full query against CollapsingMergeTree silver tables.
+--
+-- Manual refresh:
+--   SYSTEM REFRESH VIEW collapsing_test.rmv_mart_<name>;
+-- Check status:
+--   SELECT view, status FROM system.view_refreshes WHERE view LIKE 'rmv_%';
 -- ============================================================================
 
 
 -- ############################################################################
--- PROPERTY RMVs (refresh daily at 02:00 AM, after the 01:30 AM Airflow DAG)
+-- PROPERTY RMVs (manual refresh only via SYSTEM REFRESH VIEW)
 -- ############################################################################
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_property_count_by_tenant
 REFRESH EVERY 1000 YEAR
 TO collapsing_test.mart_property_count_by_tenant
+EMPTY
 AS
 SELECT
     today() AS snapshot_date,
@@ -32,6 +38,7 @@ GROUP BY tenant_id;
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_property_count_by_usage
 REFRESH EVERY 1000 YEAR
 TO collapsing_test.mart_property_count_by_usage
+EMPTY
 AS
 SELECT
     today() AS snapshot_date,
@@ -54,6 +61,7 @@ GROUP BY tenant_id, usage_category;
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_property_count_by_ownership
 REFRESH EVERY 1000 YEAR
 TO collapsing_test.mart_property_count_by_ownership
+EMPTY
 AS
 SELECT
     today() AS snapshot_date,
@@ -74,12 +82,13 @@ GROUP BY tenant_id, ownership_category;
 
 
 -- ############################################################################
--- DEMAND RMVs (refresh daily at 02:00 AM)
+-- DEMAND RMVs (manual refresh only via SYSTEM REFRESH VIEW)
 -- ############################################################################
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_demand_value_by_fy
 REFRESH EVERY 1000 YEAR
 TO collapsing_test.mart_demand_value_by_fy
+EMPTY
 AS
 SELECT
     today() AS snapshot_date,
@@ -103,6 +112,7 @@ GROUP BY financial_year;
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_collections_by_fy
 REFRESH EVERY 1000 YEAR
 TO collapsing_test.mart_collections_by_fy
+EMPTY
 AS
 SELECT
     today() AS snapshot_date,
@@ -126,6 +136,7 @@ GROUP BY financial_year;
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_collections_by_month
 REFRESH EVERY 1000 YEAR
 TO collapsing_test.mart_collections_by_month
+EMPTY
 AS
 SELECT
     today() AS snapshot_date,
@@ -150,6 +161,7 @@ GROUP BY year_month;
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_properties_with_demand_by_fy
 REFRESH EVERY 1000 YEAR
 TO collapsing_test.mart_properties_with_demand_by_fy
+EMPTY
 AS
 SELECT
     today() AS snapshot_date,
@@ -173,6 +185,7 @@ GROUP BY financial_year;
 CREATE MATERIALIZED VIEW IF NOT EXISTS collapsing_test.rmv_mart_defaulters
 REFRESH EVERY 1000 YEAR
 TO collapsing_test.mart_defaulters
+EMPTY
 AS
 SELECT
     today() AS snapshot_date,
