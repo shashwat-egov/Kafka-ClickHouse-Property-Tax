@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS collapsing_test.property_address_fact
+CREATE TABLE IF NOT EXISTS replacing_test.property_address_fact
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -43,18 +43,15 @@ CREATE TABLE IF NOT EXISTS collapsing_test.property_address_fact
     pin_code LowCardinality(String),
     latitude Decimal(9, 6),
     longitude Decimal(10, 7),
-
-    -- Collapsing sign column
-    sign Int8
 )
-ENGINE = CollapsingMergeTree(sign)
+ENGINE = ReplacingMergeTree(last_modified_time)
 ORDER BY (tenant_id, property_id)
 SETTINGS index_granularity = 8192;
 
 
 
 
-CREATE TABLE IF NOT EXISTS collapsing_test.property_unit_fact
+CREATE TABLE IF NOT EXISTS replacing_test.property_unit_fact
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -91,19 +88,15 @@ CREATE TABLE IF NOT EXISTS collapsing_test.property_unit_fact
     property_status LowCardinality(String),
     no_of_floors Int8,
 
-
-    -- Collapsing sign column
-    sign Int8
-
 )
-ENGINE = CollapsingMergeTree(sign)
+ENGINE = ReplacingMergeTree(last_modified_time)
 ORDER BY (tenant_id, unit_id)
 SETTINGS index_granularity = 8192;
 
 
 
 
-CREATE TABLE IF NOT EXISTS collapsing_test.property_owner_fact
+CREATE TABLE IF NOT EXISTS replacing_test.property_owner_fact
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -133,17 +126,13 @@ CREATE TABLE IF NOT EXISTS collapsing_test.property_owner_fact
     property_status LowCardinality(String),
     no_of_floors Int8,
 
-
-    -- Collapsing sign column
-    sign Int8
-
 )
-ENGINE = CollapsingMergeTree(sign)
+ENGINE = ReplacingMergeTree(last_modified_time)
 ORDER BY (tenant_id, owner_info_uuid)
 SETTINGS index_granularity = 8192;
 
 
-CREATE TABLE IF NOT EXISTS collapsing_test.demand_with_details_fact
+CREATE TABLE IF NOT EXISTS replacing_test.demand_with_details_fact
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -188,10 +177,7 @@ CREATE TABLE IF NOT EXISTS collapsing_test.demand_with_details_fact
     last_modified_by String,
     last_modified_time DateTime64(3),
     
-    -- Collapsing sign column
-    sign Int8
-
 )
-ENGINE = CollapsingMergeTree(sign)
+ENGINE = ReplacingMergeTree(last_modified_time)
 ORDER BY (tenant_id, demand_id)
 SETTINGS index_granularity = 8192;
