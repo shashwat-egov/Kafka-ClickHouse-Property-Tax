@@ -6,7 +6,7 @@
 -- ============================================================================
 
 -- Property Events
-CREATE TABLE IF NOT EXISTS collapsing_test.kafka_property_events
+CREATE TABLE IF NOT EXISTS replacing_test.kafka_property_events
 (
     raw String
 )
@@ -21,7 +21,7 @@ SETTINGS
     kafka_skip_broken_messages = 100;
 
 -- Demand Events
-CREATE TABLE IF NOT EXISTS collapsing_test.kafka_demand_events
+CREATE TABLE IF NOT EXISTS replacing_test.kafka_demand_events
 (
     raw String
 )

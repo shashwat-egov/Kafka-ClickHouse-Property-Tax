@@ -13,7 +13,7 @@
 -- PROPERTY EVENTS RAW
 -- ############################################################################
 
-CREATE TABLE IF NOT EXISTS collapsing_test.property_events_raw
+CREATE TABLE IF NOT EXISTS replacing_test.property_events_raw
 (
     event_time DateTime64(3) DEFAULT now64(3),
     raw String
@@ -28,7 +28,7 @@ SETTINGS index_granularity = 8192;
 -- DEMAND EVENTS RAW
 -- ############################################################################
 
-CREATE TABLE IF NOT EXISTS collapsing_test.demand_events_raw
+CREATE TABLE IF NOT EXISTS replacing_test.demand_events_raw
 (
     event_time DateTime64(3) DEFAULT now64(3),
     raw String
