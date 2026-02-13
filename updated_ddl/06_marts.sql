@@ -68,7 +68,7 @@ SELECT
             '%y'
         )
     ) AS financial_year,
-    countDistinct(property_id) AS new_property_count
+    count(property_id) AS new_property_count
 FROM replacing_test.property_address_fact
 WHERE created_time IS NOT NULL
 AND status = 'ACTIVE'
