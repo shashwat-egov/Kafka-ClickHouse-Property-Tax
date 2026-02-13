@@ -26,7 +26,7 @@ SELECT
     ownership_category,
     usage_category,
     count() AS property_count
-FROM replacing_test.property_address_fact FINAL
+FROM replacing_test.property_address_entity FINAL
 WHERE status = 'ACTIVE'
 GROUP BY
     tenant_id,
@@ -69,7 +69,7 @@ SELECT
         )
     ) AS financial_year,
     count(property_id) AS new_property_count
-FROM replacing_test.property_address_fact
+FROM replacing_test.property_address_entity FINAL
 WHERE created_time IS NOT NULL
 AND status = 'ACTIVE'
 GROUP BY
@@ -83,7 +83,7 @@ GROUP BY
 
 
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.rmv_mart_collections_by_fy
+CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.rmv_mart_demand_values_by_fy
 REFRESH EVERY 1000 YEAR
 TO replacing_test.mart_demand_value_by_fy
 EMPTY
@@ -95,7 +95,7 @@ SELECT
     sum(total_tax_amount) AS total_demand,
     sum(total_collection_amount) AS total_collection,
     sum(outstanding_amount) AS total_outstanding
-FROM replacing_test.demand_with_details_fact
+FROM replacing_test.demand_with_details_entity
 FINAL
 WHERE (business_service = 'PT') AND (demand_status = 'ACTIVE') AND (financial_year != '')
 GROUP BY
@@ -113,7 +113,7 @@ SELECT
     tenant_id,
     formatDateTime(last_modified_time, '%Y-%m') AS year_month,
     sum(total_collection_amount) AS total_collected_amount
-FROM replacing_test.demand_with_details_fact
+FROM replacing_test.demand_with_details_entity
 FINAL
 WHERE (total_collection_amount > 0) AND (demand_status = 'ACTIVE')
 GROUP BY
@@ -131,7 +131,7 @@ SELECT
     tenant_id,
     financial_year,
     consumer_code AS properties_with_demand
-FROM replacing_test.demand_with_details_fact FINAL
+FROM replacing_test.demand_with_details_entity FINAL
 WHERE business_service = 'PT'
   AND financial_year != ''
   AND demand_status = 'ACTIVE';
@@ -151,6 +151,6 @@ SELECT
     total_tax_amount,
     total_collection_amount,
     outstanding_amount
-FROM replacing_test.demand_with_details_fact
+FROM replacing_test.demand_with_details_entity
 FINAL
 WHERE (business_service = 'PT') AND (demand_status = 'ACTIVE') AND (outstanding_amount > 0);

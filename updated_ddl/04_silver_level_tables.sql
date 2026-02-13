@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS replacing_test.property_address_fact
+CREATE TABLE IF NOT EXISTS replacing_test.property_address_entity
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -51,7 +51,7 @@ SETTINGS index_granularity = 8192;
 
 
 
-CREATE TABLE IF NOT EXISTS replacing_test.property_unit_fact
+CREATE TABLE IF NOT EXISTS replacing_test.property_unit_entity
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -96,7 +96,7 @@ SETTINGS index_granularity = 8192;
 
 
 
-CREATE TABLE IF NOT EXISTS replacing_test.property_owner_fact
+CREATE TABLE IF NOT EXISTS replacing_test.property_owner_entity
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -132,7 +132,7 @@ ORDER BY (tenant_id, owner_info_uuid)
 SETTINGS index_granularity = 8192;
 
 
-CREATE TABLE IF NOT EXISTS replacing_test.demand_with_details_fact
+CREATE TABLE IF NOT EXISTS replacing_test.demand_with_details_entity
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
