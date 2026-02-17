@@ -21,7 +21,7 @@ TO replacing_test.mart_property_agg
 EMPTY
 AS
 SELECT
-    today() AS snapshot_date,
+    today() AS data_refresh_date,
     tenant_id,
     ownership_category,
     usage_category,
@@ -45,7 +45,7 @@ TO replacing_test.mart_new_properties_by_fy
 EMPTY
 AS
 SELECT
-    today() AS snapshot_date,
+    today() AS data_refresh_date,
     tenant_id,
     concat(
         toString(
@@ -89,7 +89,7 @@ TO replacing_test.mart_demand_value_by_fy
 EMPTY
 AS
 SELECT
-    today() AS snapshot_date,
+    today() AS data_refresh_date,
     tenant_id,
     financial_year,
     sum(total_tax_amount) AS total_demand,
@@ -109,7 +109,7 @@ TO replacing_test.mart_collections_by_month
 EMPTY
 AS
 SELECT
-    today() AS snapshot_date,
+    today() AS data_refresh_date,
     tenant_id,
     formatDateTime(last_modified_time, '%Y-%m') AS year_month,
     sum(total_collection_amount) AS total_collected_amount
@@ -127,7 +127,7 @@ TO replacing_test.mart_properties_with_demand_by_fy
 EMPTY
 AS
 SELECT
-    today() AS snapshot_date,
+    today() AS data_refresh_date,
     tenant_id,
     financial_year,
     consumer_code AS properties_with_demand
@@ -143,7 +143,7 @@ TO replacing_test.mart_defaulters
 EMPTY
 AS
 SELECT
-    today() AS snapshot_date,
+    today() AS data_refresh_date,
     tenant_id,
     consumer_code AS property_id,
     demand_id,

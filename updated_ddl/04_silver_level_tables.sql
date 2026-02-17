@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS replacing_test.property_address_entity
     created_time DateTime64(3),
     last_modified_by String,
     last_modified_time DateTime64(3),
+    financial_year LowCardinality(String),
 
     additionaldetails String,
 
