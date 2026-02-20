@@ -1,153 +1,177 @@
 -- ============================================================================
--- ANALYTICAL MARTS
+-- ANALYTICAL MARTS (Refreshable Materialized Views)
 -- ============================================================================
--- Property marts: Use batch RMVs (small tables)
--- Demand marts: Use streaming views (large tables, no batch needed)
+-- Mart RMVs that are manually refreshed after all silver-layer inserts complete.
+-- MVs re-execute the full query against CollapsingMergeTree silver tables.
+--
+-- Manual refresh:
+--   SYSTEM REFRESH VIEW replacing_test.rmv_mart_<name>;
+-- Check status:
+--   SELECT view, status FROM system.view_refreshes WHERE view LIKE 'rmv_%';
 -- ============================================================================
+
 
 -- ############################################################################
--- PROPERTY MARTS (Batch RMVs)
+-- PROPERTY RMVs (manual refresh only via SYSTEM REFRESH VIEW)
 -- ############################################################################
 
-CREATE TABLE IF NOT EXISTS mart_property_count_by_tenant
-(
-    snapshot_date Date DEFAULT today(),
-    tenant_id LowCardinality(String),
-    property_count UInt64
-)
-ENGINE = MergeTree ORDER BY (tenant_id);
-
-CREATE TABLE IF NOT EXISTS mart_property_count_by_usage
-(
-    snapshot_date Date DEFAULT today(),
-    tenant_id LowCardinality(String),
-    usage_category LowCardinality(String),
-    property_count UInt64
-)
-ENGINE = MergeTree ORDER BY (tenant_id, usage_category);
-
-CREATE TABLE IF NOT EXISTS mart_property_count_by_ownership
-(
-    snapshot_date Date DEFAULT today(),
-    tenant_id LowCardinality(String),
-    ownership_category LowCardinality(String),
-    property_count UInt64
-)
-ENGINE = MergeTree ORDER BY (tenant_id, ownership_category);
-
-
-CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_mart_property_count_by_tenant
-REFRESH EVERY 1 DAY OFFSET 1 HOUR 30 MINUTE
-DEPENDS ON rmv_property_snapshot
-TO mart_property_count_by_tenant
+CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.rmv_mart_property_agg
+REFRESH EVERY 1000 YEAR
+TO replacing_test.mart_property_agg
 EMPTY
 AS
 SELECT
-    today() AS snapshot_date,
-    tenant_id,
-    count() AS property_count
-FROM property_snapshot
-WHERE status = 'ACTIVE'
-GROUP BY tenant_id;
-
-
-CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_mart_property_count_by_usage
-REFRESH EVERY 1 DAY OFFSET 1 HOUR 30 MINUTE
-DEPENDS ON rmv_property_snapshot
-TO mart_property_count_by_usage
-EMPTY
-AS
-SELECT
-    today() AS snapshot_date,
-    tenant_id,
-    usage_category,
-    count() AS property_count
-FROM property_snapshot
-WHERE status = 'ACTIVE'
-GROUP BY tenant_id, usage_category;
-
-
-CREATE MATERIALIZED VIEW IF NOT EXISTS rmv_mart_property_count_by_ownership
-REFRESH EVERY 1 DAY OFFSET 1 HOUR 30 MINUTE
-DEPENDS ON rmv_property_snapshot
-TO mart_property_count_by_ownership
-EMPTY
-AS
-SELECT
-    today() AS snapshot_date,
+    today() AS data_refresh_date,
     tenant_id,
     ownership_category,
+    usage_category,
     count() AS property_count
-FROM property_snapshot
+FROM replacing_test.property_address_entity FINAL
 WHERE status = 'ACTIVE'
-GROUP BY tenant_id, ownership_category;
+GROUP BY
+    tenant_id,
+    ownership_category,
+    usage_category;
+
 
 
 -- ############################################################################
--- DEMAND MARTS (Streaming Views - no batch, always current)
+-- MART 2: New Property Count by Financial Year
+-- Depends On: rmv_property_snapshot
+-- ############################################################################
+CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.rmv_mart_new_properties_by_fy
+REFRESH EVERY 1000 YEAR
+TO replacing_test.mart_new_properties_by_fy
+EMPTY
+AS
+SELECT
+    today() AS data_refresh_date,
+    tenant_id,
+    financial_year,
+    count(property_id) AS new_property_count
+FROM replacing_test.property_address_entity FINAL
+WHERE created_time IS NOT NULL
+AND status = 'ACTIVE'
+GROUP BY
+    tenant_id,
+    financial_year;
+
+
+-- ############################################################################
+-- DEMAND RMVs (manual refresh only via SYSTEM REFRESH VIEW)
 -- ############################################################################
 
-CREATE OR REPLACE VIEW v_mart_demand_value_by_fy AS
+
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.rmv_mart_demand_values_by_fy
+REFRESH EVERY 1000 YEAR
+TO replacing_test.mart_demand_value_by_fy
+EMPTY
+AS
 SELECT
-    today() AS snapshot_date,
+    today() AS data_refresh_date,
+    tenant_id,
     financial_year,
-    sum(tax_amount) AS total_demand_amount
-FROM v_demand_detail_current
-WHERE business_service = 'PT'
-  AND financial_year != ''
-GROUP BY financial_year
-ORDER BY financial_year;
+    sum(total_tax_amount) AS total_demand,
+    sum(total_collection_amount) AS total_collection,
+    sum(outstanding_amount) AS total_outstanding
+FROM replacing_test.demand_with_details_entity
+FINAL
+WHERE (business_service = 'PT') AND (demand_status = 'ACTIVE') AND (financial_year != '')
+GROUP BY
+    tenant_id,
+    financial_year;
 
 
-CREATE OR REPLACE VIEW v_mart_collections_by_fy AS
+CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.rmv_mart_collections_by_month
+REFRESH EVERY 1000 YEAR
+TO replacing_test.mart_collections_by_month
+EMPTY
+AS
 SELECT
-    today() AS snapshot_date,
-    financial_year,
-    sum(collection_amount) AS total_collected_amount
-FROM v_demand_detail_current
-WHERE business_service = 'PT'
-  AND financial_year != ''
-GROUP BY financial_year
-ORDER BY financial_year;
-
-
-CREATE OR REPLACE VIEW v_mart_collections_by_month AS
-SELECT
-    today() AS snapshot_date,
+    today() AS data_refresh_date,
+    tenant_id,
     formatDateTime(last_modified_time, '%Y-%m') AS year_month,
-    sum(collection_amount) AS total_collected_amount
-FROM v_demand_detail_current
-WHERE business_service = 'PT'
-  AND collection_amount > 0
-  AND last_modified_time > toDateTime64('1970-01-01 00:00:00', 3)
-GROUP BY year_month
-ORDER BY year_month;
+    sum(total_collection_amount) AS total_collected_amount
+FROM replacing_test.demand_with_details_entity
+FINAL
+WHERE (total_collection_amount > 0) AND (demand_status = 'ACTIVE')
+GROUP BY
+    tenant_id,
+    year_month;
 
 
-CREATE OR REPLACE VIEW v_mart_properties_with_demand_by_fy AS
+CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.rmv_mart_properties_with_demand_by_fy
+REFRESH EVERY 1000 YEAR
+TO replacing_test.mart_properties_with_demand_by_fy
+EMPTY
+AS
 SELECT
-    today() AS snapshot_date,
+    today() AS data_refresh_date,
+    tenant_id,
     financial_year,
-    uniqExact(consumer_code) AS properties_with_demand
-FROM v_demand_detail_current
+    consumer_code AS properties_with_demand
+FROM replacing_test.demand_with_details_entity FINAL
 WHERE business_service = 'PT'
   AND financial_year != ''
-GROUP BY financial_year
-ORDER BY financial_year;
+  AND demand_status = 'ACTIVE';
 
 
-CREATE OR REPLACE VIEW v_mart_defaulters AS
+CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.rmv_mart_defaulters
+REFRESH EVERY 1000 YEAR
+TO replacing_test.mart_defaulters
+EMPTY
+AS
 SELECT
-    today() AS snapshot_date,
+    today() AS data_refresh_date,
     tenant_id,
     consumer_code AS property_id,
     demand_id,
     financial_year,
-    sum(tax_amount) AS total_tax_amount,
-    sum(collection_amount) AS total_collected_amount,
-    sum(tax_amount) - sum(collection_amount) AS outstanding_amount
-FROM v_demand_detail_current
-WHERE business_service = 'PT'
-GROUP BY tenant_id, consumer_code, demand_id, financial_year
-HAVING outstanding_amount > 0
-ORDER BY tenant_id, consumer_code, demand_id;
+    total_tax_amount,
+    total_collection_amount,
+    outstanding_amount
+FROM replacing_test.demand_with_details_entity
+FINAL
+WHERE (business_service = 'PT') AND (demand_status = 'ACTIVE') AND (outstanding_amount > 0);
+
+
+
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.rmv_mart_property_demand_coverage_by_fy
+REFRESH EVERY 1000 YEAR
+TO replacing_test.mart_property_demand_coverage_by_fy
+EMPTY
+AS
+WITH
+    demand_counts AS
+    (
+        SELECT
+            tenant_id,
+            financial_year,
+            count() AS properties_with_demand
+        FROM replacing_test.mart_properties_with_demand_by_fy
+        GROUP BY
+            tenant_id,
+            financial_year
+    ),
+    property_base AS
+    (
+        SELECT
+            tenant_id,
+            financial_year,
+            sum(new_property_count) OVER (PARTITION BY tenant_id ORDER BY financial_year ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS total_active_properties
+        FROM replacing_test.mart_new_properties_by_fy
+    )
+SELECT
+    d.tenant_id,
+    d.financial_year,
+    p.total_active_properties,
+    d.properties_with_demand,
+    p.total_active_properties - d.properties_with_demand AS properties_without_demand,
+    round(d.properties_with_demand / p.total_active_properties, 4) AS coverage_ratio
+FROM demand_counts AS d
+INNER JOIN property_base AS p ON (d.tenant_id = p.tenant_id) AND (d.financial_year = p.financial_year)
+ORDER BY
+    d.tenant_id ASC,
+    d.financial_year ASC

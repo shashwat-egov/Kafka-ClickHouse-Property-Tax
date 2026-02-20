@@ -69,6 +69,22 @@ ORDER BY (tenant_id, financial_year)
 SETTINGS index_granularity = 8192;
 
 
+CREATE TABLE replacing_test.mart_property_demand_coverage_by_fy
+(
+    snapshot_date Date,
+
+    tenant_id LowCardinality(String),
+    financial_year LowCardinality(String),
+
+    total_active_properties UInt64,
+    properties_with_demand UInt64,
+    properties_without_demand UInt64,
+    coverage_ratio Float64,
+)
+ENGINE = MergeTree
+ORDER BY (tenant_id, financial_year);
+
+
 CREATE TABLE IF NOT EXISTS replacing_test.mart_defaulters
 (
     data_refresh_date Date,
