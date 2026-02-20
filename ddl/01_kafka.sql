@@ -5,11 +5,8 @@
 -- Rule: No JSON parsing here - store as raw String using JSONAsString
 -- ============================================================================
 
--- ----------------------------------------------------------------------------
--- Property Events Kafka Table
--- Contains: property object + nested owners[], units[], address
--- ----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS punjab_kafka_test.kafka_property_events
+-- Property Events
+CREATE TABLE IF NOT EXISTS replacing_test.kafka_property_events
 (
     raw String
 )
@@ -23,11 +20,8 @@ SETTINGS
     kafka_max_block_size = 65536,
     kafka_skip_broken_messages = 100;
 
--- ----------------------------------------------------------------------------
--- Demand Events Kafka Table
--- Contains: demand object + nested demandDetails[]
--- ----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS punjab_kafka_test.kafka_demand_events
+-- Demand Events
+CREATE TABLE IF NOT EXISTS replacing_test.kafka_demand_events
 (
     raw String
 )
