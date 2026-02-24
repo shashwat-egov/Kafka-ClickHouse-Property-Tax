@@ -15,9 +15,9 @@
 -- PROPERTY RMVs (manual refresh only via SYSTEM REFRESH VIEW)
 -- ############################################################################
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.rmv_mart_property_agg
+CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.rmv_mart_active_property_distribution_summary
 REFRESH EVERY 1000 YEAR
-TO replacing_test.mart_property_agg
+TO replacing_test.mart_active_property_distribution_summary
 EMPTY
 AS
 SELECT
@@ -63,9 +63,9 @@ GROUP BY
 
 
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.rmv_mart_demand_values_by_fy
+CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.rmv_mart_demand_and_collection_summary
 REFRESH EVERY 1000 YEAR
-TO replacing_test.mart_demand_value_by_fy
+TO replacing_test.mart_demand_and_collection_summary
 EMPTY
 AS
 SELECT
