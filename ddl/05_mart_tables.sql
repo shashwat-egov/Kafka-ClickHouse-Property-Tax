@@ -2,7 +2,7 @@
 -- PROPERTY MART TABLES
 -- ############################################################################
 
-CREATE TABLE IF NOT EXISTS replacing_test.mart_property_agg
+CREATE TABLE IF NOT EXISTS replacing_test.mart_active_property_distribution_summary
 (
     data_refresh_date Date,
     tenant_id LowCardinality(String),
@@ -32,7 +32,7 @@ SETTINGS index_granularity = 8192;
 -- DEMAND MART TABLES
 -- ############################################################################
 
-CREATE TABLE IF NOT EXISTS replacing_test.mart_demand_value_by_fy
+CREATE TABLE IF NOT EXISTS replacing_test.mart_demand_and_collection_summary
 (
     data_refresh_date Date,
     tenant_id LowCardinality(String),

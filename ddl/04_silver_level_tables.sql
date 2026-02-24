@@ -182,3 +182,132 @@ CREATE TABLE IF NOT EXISTS replacing_test.demand_with_details_entity
 ENGINE = ReplacingMergeTree(last_modified_time)
 ORDER BY (tenant_id, demand_id)
 SETTINGS index_granularity = 8192;
+
+
+CREATE TABLE IF NOT EXISTS replacing_test.payment_with_details_entity
+(
+    -- Ingestion metadata
+    _ingested_at DateTime64(3) DEFAULT now64(3),
+
+    -- Keys
+    tenant_id LowCardinality(String),
+    payment_id String,
+
+    -- Payment amounts
+    total_due Decimal(12, 2),
+    total_amount_paid Decimal(12, 2),
+
+    -- Transaction info
+    transaction_number String,
+    transaction_date DateTime64(3),
+    payment_mode LowCardinality(String),
+
+    -- Instrument info
+    instrument_date DateTime64(3),
+    instrument_number String,
+    instrument_status LowCardinality(String),
+    ifsc_code String,
+
+    -- Additional info
+    additional_details String,
+
+    payer_id String,
+
+    -- Status
+    payment_status LowCardinality(String),
+
+    -- Audit
+    created_by String,
+    created_time DateTime64(3),
+    last_modified_by String,
+    last_modified_time DateTime64(3),
+    financial_year LowCardinality(String),
+
+    -- File reference
+    filestore_id String,
+
+    -- Payment Detail columns
+    receiptnumber String,
+    receiptdate DateTime64(3),
+    receipttype LowCardinality(String),
+    businessservice LowCardinality(String),
+    billid String,
+    manualreceiptnumber String,
+    manualreceiptdate DateTime64(3)
+
+)
+ENGINE = ReplacingMergeTree(last_modified_time)
+ORDER BY (tenant_id, payment_id)
+SETTINGS index_granularity = 8192;
+
+
+
+CREATE TABLE IF NOT EXISTS replacing_test.bill_entity
+(
+    -- Ingestion metadata
+    _ingested_at DateTime64(3) DEFAULT now64(3),
+
+    -- Keys
+    tenant_id LowCardinality(String),
+    bill_id String,
+
+    status LowCardinality(String),
+    iscancelled Boolean,
+    additionaldetails String,
+    collectionmodesnotallowed String,
+    partpaymentallowed Boolean,
+    isadvanceallowed Boolean,
+
+    minimumamounttobepaid Decimal(12, 2),
+
+    businessservice LowCardinality(String),
+
+    totalamount Decimal(12, 2),
+    consumercode String,
+    billnumber String,
+
+    billdate DateTime64(3),
+    reasonforcancellation String,
+
+    -- Audit
+    created_by String,
+    created_time DateTime64(3),
+    last_modified_by String,
+    last_modified_time DateTime64(3),
+    financial_year LowCardinality(String)
+
+
+)
+ENGINE = ReplacingMergeTree(last_modified_time)
+ORDER BY (tenant_id, bill_id)
+SETTINGS index_granularity = 8192;
+
+
+CREATE TABLE IF NOT EXISTS replacing_test.property_assessment_entity
+(
+    -- Ingestion metadata
+    _ingested_at DateTime64(3) DEFAULT now64(3),
+
+    -- Keys
+    tenant_id LowCardinality(String),
+    assessmentnumber String,
+
+    financialyear LowCardinality(String),
+    propertyid String,
+    status LowCardinality(String),
+    source LowCardinality(String),
+    channel LowCardinality(String),
+    assessmentdate DateTime64(3),
+    additionaldetails String,
+
+    -- Audit
+    created_by String,
+    created_time DateTime64(3),
+    last_modified_by String,
+    last_modified_time DateTime64(3),
+
+)
+ENGINE = ReplacingMergeTree(last_modified_time)
+ORDER BY (tenant_id, assessmentnumber)
+SETTINGS index_granularity = 8192;
+
