@@ -167,6 +167,14 @@ CREATE TABLE IF NOT EXISTS replacing_test.demand_with_details_entity
     pt_roundoff Decimal(18,4),
     pt_owner_exemption Decimal(18,4),
     pt_unit_usage_exemption Decimal(18,4),
+    pt_advance_carryforward Decimal(18,4),
+    pt_decimal_ceiling_debit Decimal(18,4),
+    pt_time_rebate Decimal(18,4),
+    pt_decimal_ceiling_credit Decimal(18,4),
+    pt_time_penalty Decimal(18,4),
+    pt_adhoc_penalty Decimal(18,4),
+    pt_adhoc_rebate Decimal(18,4),
+    pt_time_interest Decimal(18,4),
 
     -- Derived columns
     outstanding_amount Decimal(18, 4),
