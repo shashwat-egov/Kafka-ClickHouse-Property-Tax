@@ -174,4 +174,69 @@ FROM demand_counts AS d
 INNER JOIN property_base AS p ON (d.tenant_id = p.tenant_id) AND (d.financial_year = p.financial_year)
 ORDER BY
     d.tenant_id ASC,
-    d.financial_year ASC
+    d.financial_year ASC;
+
+
+-- Snapshot History → Change Detection
+-- Uses lagInFrame() to compare each snapshot with the previous one.
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.rmv_property_change_metrics
+REFRESH EVERY 1000 YEAR
+TO replacing_test.property_change_metrics
+EMPTY
+AS
+SELECT
+    tenant_id,
+    property_id,
+    event_time,
+
+    if(ownership_category != lagInFrame(ownership_category, 1, ownership_category)
+       OVER w, 1, 0) AS ownership_changed,
+
+    if(usage_category != lagInFrame(usage_category, 1, usage_category)
+       OVER w, 1, 0) AS usage_changed,
+
+    if(super_built_up_area != lagInFrame(super_built_up_area, 1, super_built_up_area)
+       OVER w OR land_area != lagInFrame(land_area, 1, land_area)
+       OVER w, 1, 0) AS area_changed,
+
+    if(workflow_state != lagInFrame(workflow_state, 1, workflow_state)
+       OVER w, 1, 0) AS workflow_state_changed,
+
+    if(owner_count != lagInFrame(owner_count, 1, owner_count)
+       OVER w, 1, 0) AS owner_count_changed
+
+FROM replacing_test.property_snapshot_history
+WINDOW w AS (
+    PARTITION BY tenant_id, property_id
+    ORDER BY event_time
+);
+
+
+-- Change Metrics → Risk Summary
+-- Aggregates change flags per property and computes a risk score.
+-- Depends on rmv_property_change_metrics completing first.
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.rmv_property_risk_summary
+REFRESH EVERY 1000 YEAR
+TO replacing_test.property_risk_summary
+EMPTY
+AS
+SELECT
+    today() AS snapshot_date,
+    tenant_id,
+    property_id,
+
+    count() AS total_updates,
+    sum(ownership_changed) AS ownership_changes,
+    sum(area_changed) AS area_changes,
+    sum(workflow_state_changed) AS workflow_reopens,
+
+    if(
+        sum(ownership_changed) > 1 OR
+        sum(area_changed) > 2 OR
+        sum(workflow_state_changed) > 1,
+        1, 0
+    ) AS risk_score
+FROM replacing_test.property_change_metrics
+GROUP BY tenant_id, property_id;

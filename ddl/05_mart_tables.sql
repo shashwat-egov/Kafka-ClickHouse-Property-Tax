@@ -99,3 +99,33 @@ CREATE TABLE IF NOT EXISTS replacing_test.mart_defaulters
 ENGINE = MergeTree
 ORDER BY (tenant_id, financial_year)
 SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS replacing_test.property_change_metrics
+(
+    tenant_id LowCardinality(String),
+    property_id String,
+    event_time DateTime64(3),
+    ownership_changed UInt8,
+    usage_changed UInt8,
+    area_changed UInt8,
+    workflow_state_changed UInt8,
+    owner_count_changed UInt8
+)
+ENGINE = MergeTree
+ORDER BY (tenant_id, property_id, event_time)
+SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS replacing_test.property_risk_summary
+(
+    snapshot_date Date,
+    tenant_id LowCardinality(String),
+    property_id String,
+    total_updates UInt32,
+    ownership_changes UInt32,
+    area_changes UInt32,
+    workflow_reopens UInt32,
+    risk_score UInt8
+)
+ENGINE = MergeTree
+ORDER BY (tenant_id, property_id)
+SETTINGS index_granularity = 8192;
