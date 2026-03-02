@@ -323,7 +323,7 @@ CREATE TABLE IF NOT EXISTS replacing_test.property_snapshot_history
 (
     tenant_id LowCardinality(String),
     property_id String,
-    event_time DateTime64(3),
+    event_time DateTime64(3) DEFAULT now64(3),
 
     ownership_category LowCardinality(String),
     usage_category LowCardinality(String),
@@ -334,7 +334,7 @@ CREATE TABLE IF NOT EXISTS replacing_test.property_snapshot_history
     land_area Decimal(18, 2),
     owner_count UInt8,
 
-    audit_created_time DateTime64(3),
+    audit_created_time DateTime64(3) DEFAULT now64(3),
     created_time DateTime64(3),
     last_modified_time DateTime64(3)
 )
