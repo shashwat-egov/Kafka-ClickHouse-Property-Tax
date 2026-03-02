@@ -319,3 +319,26 @@ ENGINE = ReplacingMergeTree(last_modified_time)
 ORDER BY (tenant_id, assessmentnumber)
 SETTINGS index_granularity = 8192;
 
+CREATE TABLE IF NOT EXISTS replacing_test.property_snapshot_history
+(
+    tenant_id LowCardinality(String),
+    property_id String,
+    event_time DateTime64(3),
+
+    ownership_category LowCardinality(String),
+    usage_category LowCardinality(String),
+    property_status LowCardinality(String),
+    workflow_state LowCardinality(String),
+
+    super_built_up_area Decimal(18, 2),
+    land_area Decimal(18, 2),
+    owner_count UInt8,
+
+    audit_created_time DateTime64(3),
+    created_time DateTime64(3),
+    last_modified_time DateTime64(3)
+)
+ENGINE = MergeTree
+ORDER BY (tenant_id, property_id, event_time)
+SETTINGS index_granularity = 8192;
+
