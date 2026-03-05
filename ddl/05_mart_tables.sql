@@ -2,21 +2,22 @@
 -- PROPERTY MART TABLES
 -- ############################################################################
 
-CREATE TABLE IF NOT EXISTS replacing_test.mart_active_property_distribution_summary
+CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_active_property_distribution_summary
 (
     data_refresh_date Date,
     tenant_id LowCardinality(String),
+    property_type LowCardinality(String),
     ownership_category LowCardinality(String),
     usage_category LowCardinality(String),
     property_count UInt64
 )
 ENGINE = MergeTree
-ORDER BY (tenant_id, ownership_category, usage_category)
+ORDER BY (tenant_id, property_type, ownership_category, usage_category)
 SETTINGS index_granularity = 8192;
 
 
 
-CREATE TABLE IF NOT EXISTS replacing_test.mart_new_properties_by_fy
+CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_new_properties_by_fy
 (
     data_refresh_date Date,
     tenant_id LowCardinality(String),
@@ -32,7 +33,7 @@ SETTINGS index_granularity = 8192;
 -- DEMAND MART TABLES
 -- ############################################################################
 
-CREATE TABLE IF NOT EXISTS replacing_test.mart_demand_and_collection_summary
+CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_demand_and_collection_summary
 (
     data_refresh_date Date,
     tenant_id LowCardinality(String),
@@ -45,7 +46,7 @@ ENGINE = MergeTree
 ORDER BY (tenant_id, financial_year)
 SETTINGS index_granularity = 8192;
 
-CREATE TABLE IF NOT EXISTS replacing_test.mart_collections_by_month
+CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_collections_by_month
 (
     data_refresh_date Date,
     tenant_id LowCardinality(String),
@@ -57,7 +58,7 @@ ORDER BY (tenant_id, year_month)
 SETTINGS index_granularity = 8192;
 
 
-CREATE TABLE IF NOT EXISTS replacing_test.mart_properties_with_demand_by_fy
+CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_properties_with_demand_by_fy
 (
     data_refresh_date Date,
     tenant_id LowCardinality(String),
@@ -69,9 +70,9 @@ ORDER BY (tenant_id, financial_year)
 SETTINGS index_granularity = 8192;
 
 
-CREATE TABLE replacing_test.mart_property_demand_coverage_by_fy
+CREATE TABLE punjab_property_tax.mart_property_demand_coverage_by_fy
 (
-    snapshot_date Date,
+    data_refresh_date Date,
 
     tenant_id LowCardinality(String),
     financial_year LowCardinality(String),
@@ -85,7 +86,7 @@ ENGINE = MergeTree
 ORDER BY (tenant_id, financial_year);
 
 
-CREATE TABLE IF NOT EXISTS replacing_test.mart_defaulters
+CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_defaulters
 (
     data_refresh_date Date,
     tenant_id LowCardinality(String),
@@ -100,26 +101,29 @@ ENGINE = MergeTree
 ORDER BY (tenant_id, financial_year)
 SETTINGS index_granularity = 8192;
 
-CREATE TABLE IF NOT EXISTS replacing_test.property_change_metrics
+CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_property_change_metrics
 (
     tenant_id LowCardinality(String),
     property_id String,
-    event_time DateTime64(3),
-    ownership_changed UInt8,
-    usage_changed UInt8,
+    property_type LowCardinality(String),
+    data_refresh_date Date,
+    ownership_category_changed UInt8,
+    usage_category_changed UInt8,
     area_changed UInt8,
     workflow_state_changed UInt8,
-    owner_count_changed UInt8
+    owners_changed UInt8,
+    audit_created_time DateTime64(3)
 )
 ENGINE = MergeTree
-ORDER BY (tenant_id, property_id, event_time)
+ORDER BY (tenant_id, property_type, property_id)
 SETTINGS index_granularity = 8192;
 
-CREATE TABLE IF NOT EXISTS replacing_test.property_risk_summary
+CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_property_risk_summary
 (
-    snapshot_date Date,
+    data_refresh_date Date,
     tenant_id LowCardinality(String),
     property_id String,
+    property_type LowCardinality(String),
     total_updates UInt32,
     ownership_changes UInt32,
     area_changes UInt32,
@@ -127,5 +131,5 @@ CREATE TABLE IF NOT EXISTS replacing_test.property_risk_summary
     risk_score UInt8
 )
 ENGINE = MergeTree
-ORDER BY (tenant_id, property_id)
+ORDER BY (tenant_id, property_type, property_id)
 SETTINGS index_granularity = 8192;
