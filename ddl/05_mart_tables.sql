@@ -4,7 +4,7 @@
 
 CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_active_property_distribution_summary
 (
-    data_refresh_date Date,
+    data_refresh_date Date DEFAULT today(),
     tenant_id LowCardinality(String),
     property_type LowCardinality(String),
     ownership_category LowCardinality(String),
@@ -19,7 +19,7 @@ SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_new_properties_by_fy
 (
-    data_refresh_date Date,
+    data_refresh_date Date DEFAULT today(),
     tenant_id LowCardinality(String),
     financial_year LowCardinality(String),
     new_property_count UInt64
@@ -35,7 +35,7 @@ SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_demand_and_collection_summary
 (
-    data_refresh_date Date,
+    data_refresh_date Date DEFAULT today(),
     tenant_id LowCardinality(String),
     financial_year LowCardinality(String),
     total_demand Decimal(18, 2),
@@ -48,7 +48,7 @@ SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_collections_by_month
 (
-    data_refresh_date Date,
+    data_refresh_date Date DEFAULT today(),
     tenant_id LowCardinality(String),
     year_month LowCardinality(String),
     total_collected_amount Decimal(18, 4)
@@ -60,7 +60,7 @@ SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_properties_with_demand_by_fy
 (
-    data_refresh_date Date,
+    data_refresh_date Date DEFAULT today(),
     tenant_id LowCardinality(String),
     financial_year LowCardinality(String),
     properties_with_demand String
@@ -72,7 +72,7 @@ SETTINGS index_granularity = 8192;
 
 CREATE TABLE punjab_property_tax.mart_property_demand_coverage_by_fy
 (
-    data_refresh_date Date,
+    data_refresh_date Date DEFAULT today(),
 
     tenant_id LowCardinality(String),
     financial_year LowCardinality(String),
@@ -88,7 +88,7 @@ ORDER BY (tenant_id, financial_year);
 
 CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_defaulters
 (
-    data_refresh_date Date,
+    data_refresh_date Date DEFAULT today(),
     tenant_id LowCardinality(String),
     property_id String,
     demand_id String,
@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_property_change_metrics
     tenant_id LowCardinality(String),
     property_id String,
     property_type LowCardinality(String),
-    data_refresh_date Date,
+    data_refresh_date Date DEFAULT today(),
     ownership_category_changed UInt8,
     usage_category_changed UInt8,
     area_changed UInt8,
@@ -120,7 +120,7 @@ SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_property_risk_summary
 (
-    data_refresh_date Date,
+    data_refresh_date Date DEFAULT today(),
     tenant_id LowCardinality(String),
     property_id String,
     property_type LowCardinality(String),

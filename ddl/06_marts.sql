@@ -21,7 +21,7 @@ TO punjab_property_tax.mart_active_property_distribution_summary
 EMPTY
 AS
 SELECT
-    today() AS data_refresh_date,
+    data_refresh_date,
     tenant_id,
     property_type,
     ownership_category,
@@ -47,7 +47,7 @@ TO punjab_property_tax.mart_new_properties_by_fy
 EMPTY
 AS
 SELECT
-    today() AS data_refresh_date,
+    data_refresh_date,
     tenant_id,
     financial_year,
     count(property_id) AS new_property_count
@@ -71,7 +71,7 @@ TO punjab_property_tax.mart_demand_and_collection_summary
 EMPTY
 AS
 SELECT
-    today() AS data_refresh_date,
+    data_refresh_date,
     tenant_id,
     financial_year,
     sum(total_tax_amount) AS total_demand,
@@ -91,7 +91,7 @@ TO punjab_property_tax.mart_collections_by_month
 EMPTY
 AS
 SELECT
-    today() AS data_refresh_date,
+    data_refresh_date,
     tenant_id,
     formatDateTime(last_modified_time, '%Y-%m') AS year_month,
     sum(total_collection_amount) AS total_collected_amount
@@ -109,7 +109,7 @@ TO punjab_property_tax.mart_properties_with_demand_by_fy
 EMPTY
 AS
 SELECT
-    today() AS data_refresh_date,
+    data_refresh_date,
     tenant_id,
     financial_year,
     consumer_code AS properties_with_demand
@@ -125,7 +125,7 @@ TO punjab_property_tax.mart_defaulters
 EMPTY
 AS
 SELECT
-    today() AS data_refresh_date,
+    data_refresh_date,
     tenant_id,
     consumer_code AS property_id,
     demand_id,
@@ -149,7 +149,7 @@ WITH
     demand_counts AS
     (
         SELECT
-            today() AS data_refresh_date,
+            data_refresh_date,
             tenant_id,
             financial_year,
             count() AS properties_with_demand
@@ -196,7 +196,7 @@ SELECT
     tenant_id,
     property_id,
     property_type,
-    today() AS data_refresh_date,
+    data_refresh_date,
     audit_created_time,
 
     if(ownership_category != lagInFrame(ownership_category, 1, ownership_category)
@@ -232,7 +232,7 @@ TO punjab_property_tax.mart_property_risk_summary
 EMPTY
 AS
 SELECT
-    today() AS data_refresh_date,
+    data_refresh_date,
     tenant_id,
     property_id,
     property_type,
