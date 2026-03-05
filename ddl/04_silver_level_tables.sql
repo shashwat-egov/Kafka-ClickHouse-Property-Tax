@@ -321,10 +321,10 @@ SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS punjab_property_tax.property_audit_entity
 (
+    _ingested_at DateTime64(3) DEFAULT now64(3),
     tenant_id LowCardinality(String),
     property_id String,
     property_type LowCardinality(String),
-    _ingested_at DateTime64(3) DEFAULT now64(3),
 
     ownership_category LowCardinality(String),
     usage_category LowCardinality(String),

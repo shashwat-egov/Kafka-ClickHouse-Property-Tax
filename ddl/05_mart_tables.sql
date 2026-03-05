@@ -103,10 +103,10 @@ SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_property_change_metrics
 (
+    data_refresh_date Date DEFAULT today(),
     tenant_id LowCardinality(String),
     property_id String,
     property_type LowCardinality(String),
-    data_refresh_date Date DEFAULT today(),
     ownership_category_changed UInt8,
     usage_category_changed UInt8,
     area_changed UInt8,
