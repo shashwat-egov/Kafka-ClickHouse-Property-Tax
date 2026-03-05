@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS replacing_test.property_address_entity
+CREATE TABLE IF NOT EXISTS punjab_property_tax.property_address_entity
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -52,7 +52,7 @@ SETTINGS index_granularity = 8192;
 
 
 
-CREATE TABLE IF NOT EXISTS replacing_test.property_unit_entity
+CREATE TABLE IF NOT EXISTS punjab_property_tax.property_unit_entity
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -97,7 +97,7 @@ SETTINGS index_granularity = 8192;
 
 
 
-CREATE TABLE IF NOT EXISTS replacing_test.property_owner_entity
+CREATE TABLE IF NOT EXISTS punjab_property_tax.property_owner_entity
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -133,7 +133,7 @@ ORDER BY (tenant_id, owner_info_uuid)
 SETTINGS index_granularity = 8192;
 
 
-CREATE TABLE IF NOT EXISTS replacing_test.demand_with_details_entity
+CREATE TABLE IF NOT EXISTS punjab_property_tax.demand_with_details_entity
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -192,7 +192,7 @@ ORDER BY (tenant_id, demand_id)
 SETTINGS index_granularity = 8192;
 
 
-CREATE TABLE IF NOT EXISTS replacing_test.payment_with_details_entity
+CREATE TABLE IF NOT EXISTS punjab_property_tax.payment_with_details_entity
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -250,7 +250,7 @@ SETTINGS index_granularity = 8192;
 
 
 
-CREATE TABLE IF NOT EXISTS replacing_test.bill_entity
+CREATE TABLE IF NOT EXISTS punjab_property_tax.bill_entity
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -291,7 +291,7 @@ ORDER BY (tenant_id, bill_id)
 SETTINGS index_granularity = 8192;
 
 
-CREATE TABLE IF NOT EXISTS replacing_test.property_assessment_entity
+CREATE TABLE IF NOT EXISTS punjab_property_tax.property_assessment_entity
 (
     -- Ingestion metadata
     _ingested_at DateTime64(3) DEFAULT now64(3),
@@ -319,11 +319,12 @@ ENGINE = ReplacingMergeTree(last_modified_time)
 ORDER BY (tenant_id, assessmentnumber)
 SETTINGS index_granularity = 8192;
 
-CREATE TABLE IF NOT EXISTS replacing_test.property_snapshot_history
+CREATE TABLE IF NOT EXISTS punjab_property_tax.property_audit_entity
 (
+    _ingested_at DateTime64(3) DEFAULT now64(3),
     tenant_id LowCardinality(String),
     property_id String,
-    event_time DateTime64(3) DEFAULT now64(3),
+    property_type LowCardinality(String),
 
     ownership_category LowCardinality(String),
     usage_category LowCardinality(String),
@@ -339,6 +340,6 @@ CREATE TABLE IF NOT EXISTS replacing_test.property_snapshot_history
     last_modified_time DateTime64(3)
 )
 ENGINE = MergeTree
-ORDER BY (tenant_id, property_id, event_time)
+ORDER BY (tenant_id, property_id, audit_created_time)
 SETTINGS index_granularity = 8192;
 
