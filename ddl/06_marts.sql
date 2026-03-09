@@ -326,3 +326,49 @@ LEFT JOIN owner_users AS o
     ON a.tenant_id = o.tenant_id AND a.propertyid = o.property_id AND a.created_by = o.user_id
 GROUP BY a.tenant_id, a.financialyear, pt.property_type, a.channel;
 
+
+-- ############################################################################
+-- PAYMENT SUMMARY BY FY
+-- ############################################################################
+-- Payment metrics by financial year, property type, and payment mode.
+-- Part payment: total_amount_paid < total_due.
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_mart_payment_summary_by_fy
+REFRESH EVERY 1000 YEAR
+TO punjab_property_tax.mart_payment_summary_by_fy
+EMPTY
+AS
+WITH payments AS (
+    SELECT tenant_id, payment_id,
+           concat(
+               toString(toYear(transaction_date) - if(toMonth(transaction_date) < 4, 1, 0)),
+               '-',
+               substring(toString(toYear(transaction_date) + if(toMonth(transaction_date) >= 4, 1, 0)), 3, 2)
+           ) AS financial_year,
+           payment_mode, total_amount_paid, total_due, billid
+    FROM punjab_property_tax.payment_with_details_entity FINAL
+    WHERE businessservice = 'PT'
+),
+bills AS (
+    SELECT tenant_id, bill_id, consumercode AS property_id
+    FROM punjab_property_tax.bill_entity FINAL
+),
+property_types AS (
+    SELECT tenant_id, property_id, property_type
+    FROM punjab_property_tax.property_address_entity FINAL
+)
+SELECT
+    p.tenant_id AS tenant_id,
+    p.financial_year AS financial_year,
+    pt.property_type AS property_type,
+    p.payment_mode AS payment_mode,
+    count() AS total_payments,
+    sum(p.total_amount_paid) AS total_amount_collected,
+    countIf(p.total_amount_paid < p.total_due) AS total_part_payments
+FROM payments AS p
+LEFT JOIN bills AS b
+    ON p.tenant_id = b.tenant_id AND p.billid = b.bill_id
+LEFT JOIN property_types AS pt
+    ON p.tenant_id = pt.tenant_id AND b.property_id = pt.property_id
+GROUP BY p.tenant_id, p.financial_year, pt.property_type, p.payment_mode;
+

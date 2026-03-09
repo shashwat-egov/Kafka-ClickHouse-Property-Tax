@@ -166,3 +166,18 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_assessment_summary_by_fy
 ENGINE = MergeTree
 ORDER BY (tenant_id, financial_year, property_type, channel)
 SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_payment_summary_by_fy
+(
+    data_refresh_date Date DEFAULT today(),
+    tenant_id LowCardinality(String),
+    financial_year LowCardinality(String),
+    property_type LowCardinality(String),
+    payment_mode LowCardinality(String),
+    total_payments UInt64,
+    total_amount_collected Decimal(18, 2),
+    total_part_payments UInt64
+)
+ENGINE = MergeTree
+ORDER BY (tenant_id, financial_year, property_type, payment_mode)
+SETTINGS index_granularity = 8192;
