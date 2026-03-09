@@ -372,3 +372,40 @@ LEFT JOIN property_types AS pt
     ON p.tenant_id = pt.tenant_id AND b.property_id = pt.property_id
 GROUP BY p.tenant_id, p.financial_year, pt.property_type, p.payment_mode;
 
+
+-- ############################################################################
+-- REBATE SUMMARY BY FY
+-- ############################################################################
+-- Average rebate size by financial year and property type.
+-- Rebate = abs(pt_time_rebate) + abs(pt_adhoc_rebate).
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_mart_rebate_summary_by_fy
+REFRESH EVERY 1000 YEAR
+TO punjab_property_tax.mart_rebate_summary_by_fy
+EMPTY
+AS
+WITH demands AS (
+    SELECT tenant_id, demand_id, consumer_code, financial_year,
+           abs(pt_time_rebate) + abs(pt_adhoc_rebate) AS rebate_amount
+    FROM punjab_property_tax.demand_with_details_entity FINAL
+    WHERE business_service = 'PT'
+      AND demand_status = 'ACTIVE'
+      AND financial_year != ''
+      AND (pt_time_rebate != 0 OR pt_adhoc_rebate != 0)
+),
+property_types AS (
+    SELECT tenant_id, property_id, property_type
+    FROM punjab_property_tax.property_address_entity FINAL
+)
+SELECT
+    d.tenant_id AS tenant_id,
+    d.financial_year AS financial_year,
+    pt.property_type AS property_type,
+    avg(d.rebate_amount) AS avg_rebate_amount,
+    sum(d.rebate_amount) AS total_rebate_amount,
+    count() AS demands_with_rebate
+FROM demands AS d
+LEFT JOIN property_types AS pt
+    ON d.tenant_id = pt.tenant_id AND d.consumer_code = pt.property_id
+GROUP BY d.tenant_id, d.financial_year, pt.property_type;
+
