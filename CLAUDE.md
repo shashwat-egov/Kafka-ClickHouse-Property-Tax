@@ -1,6 +1,10 @@
-# Property Tax Analytics Pipeline
+# CLAUDE.md
 
-Append-only analytical pipeline using ClickHouse with a Bronze-Silver-Gold layered architecture. Silver tables are enriched nightly via Airflow; mart RMVs are refreshed sequentially after silver ingestion completes.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+Append-only analytical pipeline for Punjab property tax data using ClickHouse with a Bronze-Silver-Gold layered architecture. Silver tables are enriched nightly via Airflow; mart RMVs are refreshed sequentially after silver ingestion completes.
 
 ## Quick Start
 
@@ -78,9 +82,15 @@ All tables live under the `replacing_test` schema.
 | `property_address_entity` | ReplacingMergeTree | `(tenant_id, property_id)` | Denormalized property + address |
 | `property_unit_entity` | ReplacingMergeTree | `(tenant_id, unit_id)` | Property units |
 | `property_owner_entity` | ReplacingMergeTree | `(tenant_id, owner_info_uuid)` | Property owners |
-| `demand_with_details_entity` | ReplacingMergeTree | `(tenant_id, demand_id)` | Denormalized demand + breakdowns |
+| `demand_with_details_entity` | ReplacingMergeTree | `(tenant_id, demand_id)` | Demand + tax breakdowns |
+| `payment_with_details_entity` | ReplacingMergeTree | `(tenant_id, payment_id)` | Payment details |
+| `bill_entity` | ReplacingMergeTree | `(tenant_id, bill_id)` | Bills |
+| `property_assessment_entity` | ReplacingMergeTree | `(tenant_id, assessmentnumber)` | Assessments by FY |
+| `property_audit_entity` | MergeTree | `(tenant_id, property_id, audit_created_time)` | Append-only audit trail |
 
-### Gold (Marts)
+All ReplacingMergeTree tables use `last_modified_time` as the version column. `property_audit_entity` is the exception — it's append-only MergeTree (not deduped) since it tracks change history.
+
+### Gold Marts (punjab_property_tax)
 
 | Table | RMV | Purpose |
 |-------|-----|---------|
@@ -90,6 +100,23 @@ All tables live under the `replacing_test` schema.
 | `mart_collections_by_month` | `rmv_mart_collections_by_month` | Monthly collection totals |
 | `mart_properties_with_demand_by_fy` | `rmv_mart_properties_with_demand_by_fy` | Properties with active demand by FY |
 | `mart_defaulters` | `rmv_mart_defaulters` | Properties with outstanding balances |
+| `mart_property_demand_coverage_by_fy` | `rmv_mart_property_demand_coverage_by_fy` | Demand coverage ratio (depends on other marts) |
+| `mart_property_change_metrics` | `rmv_property_change_metrics` | Per-property change detection from audit trail |
+| `mart_property_risk_summary` | `rmv_property_risk_summary` | Risk scores from aggregated change flags |
+
+**Mart dependencies**: `rmv_mart_property_demand_coverage_by_fy` reads from `mart_properties_with_demand_by_fy` and `property_assessment_entity`, so it must refresh after those. `rmv_property_risk_summary` reads from `mart_property_change_metrics`, so it must refresh after that.
+
+## RMV Refresh
+
+RMVs use `REFRESH EVERY 1000 YEAR` (effectively manual-only). Airflow triggers them sequentially after silver enrichment.
+
+```sql
+-- Manual refresh
+SYSTEM REFRESH VIEW punjab_property_tax.rmv_mart_active_property_distribution_summary;
+
+-- Check status
+SELECT view, status FROM system.view_refreshes WHERE view LIKE 'rmv_%';
+```
 
 ## Constraints
 

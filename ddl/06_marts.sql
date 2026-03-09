@@ -133,46 +133,6 @@ WHERE (business_service = 'PT') AND (demand_status = 'ACTIVE') AND (outstanding_
 
 
 
-
-CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_mart_property_demand_coverage_by_fy
-REFRESH EVERY 1000 YEAR
-TO punjab_property_tax.mart_property_demand_coverage_by_fy
-EMPTY
-AS
-WITH
-    demand_counts AS
-    (
-        SELECT
-            tenant_id,
-            financial_year,
-            count() AS properties_with_demand
-        FROM punjab_property_tax.mart_properties_with_demand_by_fy
-        GROUP BY
-            tenant_id,
-            financial_year
-    ),
-    property_base AS
-    (
-        SELECT
-            tenant_id,
-            financial_year,
-            sum(new_property_count) OVER (PARTITION BY tenant_id ORDER BY financial_year ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS total_active_properties
-        FROM punjab_property_tax.mart_new_properties_by_fy
-    )
-SELECT
-    d.tenant_id,
-    d.financial_year,
-    p.total_active_properties,
-    d.properties_with_demand,
-    p.total_active_properties - d.properties_with_demand AS properties_without_demand,
-    round(d.properties_with_demand / p.total_active_properties, 4) AS coverage_ratio
-FROM demand_counts AS d
-INNER JOIN property_base AS p ON (d.tenant_id = p.tenant_id) AND (d.financial_year = p.financial_year)
-ORDER BY
-    d.tenant_id ASC,
-    d.financial_year ASC;
-
-
 -- ############################################################################
 -- CHANGE METRICS RMVs (manual refresh only via SYSTEM REFRESH VIEW)
 -- ############################################################################
@@ -241,3 +201,50 @@ SELECT
     ) AS risk_score
 FROM punjab_property_tax.mart_property_change_metrics
 GROUP BY tenant_id, property_id, property_type;
+
+-- This mart shows the number of properties with demand and number of properties that were assessed
+-- for each tenant and financial year 
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_property_demand_vs_assessed_by_fy
+REFRESH EVERY 1000 YEAR
+TO punjab_property_tax.mart_property_demand_vs_assessed_by_fy
+EMPTY
+AS
+WITH demand_counts AS
+(
+    SELECT
+        tenant_id,
+        financial_year,
+        count() AS properties_with_demand
+    FROM punjab_property_tax.mart_properties_with_demand_by_fy
+    GROUP BY
+        tenant_id,
+        financial_year
+),
+
+property_counts AS
+(
+    SELECT
+        tenant_id,
+        financialyear AS financial_year,
+        countDistinct(propertyid) AS total_properties_assessed
+    FROM punjab_property_tax.property_assessment_entity FINAL
+    WHERE status = 'ACTIVE'
+    GROUP BY
+        tenant_id,
+        financial_year
+)
+
+SELECT
+    d.tenant_id,
+    d.financial_year,
+    p.total_properties_assessed,
+    d.properties_with_demand
+FROM demand_counts d
+INNER JOIN property_counts p
+    ON d.tenant_id = p.tenant_id
+   AND d.financial_year = p.financial_year
+ORDER BY
+    d.tenant_id,
+    d.financial_year;
+
