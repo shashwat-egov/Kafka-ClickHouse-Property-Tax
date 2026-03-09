@@ -285,3 +285,44 @@ WITH demand_properties AS
  GROUP BY tenant_id, financial_year
  ORDER BY tenant_id, financial_year;
 
+
+-- ############################################################################
+-- ASSESSMENT SUMMARY BY FY
+-- ############################################################################
+-- Counts assessments by financial year, property type, and channel,
+-- split into assessments done by the property owner vs others.
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_mart_assessment_summary_by_fy
+REFRESH EVERY 1000 YEAR
+TO punjab_property_tax.mart_assessment_summary_by_fy
+EMPTY
+AS
+WITH assessments AS (
+    SELECT tenant_id, financialyear, propertyid, channel, created_by
+    FROM punjab_property_tax.property_assessment_entity FINAL
+    WHERE status = 'ACTIVE'
+        AND financialyear != ''
+),
+property_types AS (
+    SELECT DISTINCT tenant_id, property_id, property_type
+    FROM punjab_property_tax.property_owner_entity FINAL
+),
+owner_users AS (
+    SELECT DISTINCT tenant_id, property_id, user_id
+    FROM punjab_property_tax.property_owner_entity FINAL
+)
+SELECT
+    a.tenant_id AS tenant_id,
+    a.financialyear AS financial_year,
+    pt.property_type AS property_type,
+    a.channel AS channel,
+    count() AS total_assessments,
+    countIf(o.user_id != '') AS assessments_by_owner,
+    countIf(o.user_id = '') AS assessments_by_others
+FROM assessments AS a
+LEFT JOIN property_types AS pt
+    ON a.tenant_id = pt.tenant_id AND a.propertyid = pt.property_id
+LEFT JOIN owner_users AS o
+    ON a.tenant_id = o.tenant_id AND a.propertyid = o.property_id AND a.created_by = o.user_id
+GROUP BY a.tenant_id, a.financialyear, pt.property_type, a.channel;
+

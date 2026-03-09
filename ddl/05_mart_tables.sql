@@ -151,3 +151,18 @@ CREATE TABLE punjab_property_tax.mart_property_demand_vs_assessed_by_fy
 )
 ENGINE = MergeTree
 ORDER BY (tenant_id, financial_year);
+
+CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_assessment_summary_by_fy
+(
+    data_refresh_date Date DEFAULT today(),
+    tenant_id LowCardinality(String),
+    financial_year LowCardinality(String),
+    property_type LowCardinality(String),
+    channel LowCardinality(String),
+    total_assessments UInt64,
+    assessments_by_owner UInt64,
+    assessments_by_others UInt64
+)
+ENGINE = MergeTree
+ORDER BY (tenant_id, financial_year, property_type, channel)
+SETTINGS index_granularity = 8192;
