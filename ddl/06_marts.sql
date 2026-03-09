@@ -202,6 +202,37 @@ SELECT
 FROM punjab_property_tax.mart_property_change_metrics
 GROUP BY tenant_id, property_id, property_type;
 
+-- Layer 3b: Change Metrics → Risk Summary by Financial Year
+-- Same as rmv_property_risk_summary but aggregated per FY (derived from audit_created_time).
+-- Depends on rmv_property_change_metrics completing first.
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_property_risk_summary_by_fy
+REFRESH EVERY 1000 YEAR
+TO punjab_property_tax.mart_property_risk_summary_by_fy
+EMPTY
+AS
+SELECT
+    tenant_id,
+    property_id,
+    property_type,
+    concat(
+    toString(toYear(audit_created_time) - if(toMonth(audit_created_time) < 4, 1, 0)),
+    '-',
+    substring(toString(toYear(audit_created_time) + if(toMonth(audit_created_time) >= 4, 1, 0)), 3, 2)
+    ) AS financial_year,    
+        count() AS total_updates,
+        sum(ownership_category_changed) AS ownership_changes,
+        sum(area_changed) AS area_changes,
+        sum(workflow_state_changed) AS workflow_reopens,    
+    if(
+        sum(ownership_category_changed) > 1 OR
+        sum(area_changed) > 2 OR
+        sum(workflow_state_changed) > 1,
+        1, 0
+    ) AS risk_score
+FROM punjab_property_tax.mart_property_change_metrics
+GROUP BY tenant_id, property_id, property_type, financial_year;
+
 -- This mart shows the number of properties with demand and number of properties that were assessed
 -- for each tenant and financial year 
 
