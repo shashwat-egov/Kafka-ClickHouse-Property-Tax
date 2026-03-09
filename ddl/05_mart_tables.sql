@@ -128,7 +128,9 @@ CREATE TABLE punjab_property_tax.mart_property_demand_vs_assessed_by_fy
     financial_year LowCardinality(String),
 
     total_properties_assessed UInt64,
-    properties_with_demand UInt64
+    total_properties_with_demand UInt64,
+    total_properties_with_demand_no_assessment UInt64, -- properties with demand but no assessment
+    total_properties_with_assessment_no_demand UInt64 -- properties with assessment but no demand
 )
 ENGINE = MergeTree
 ORDER BY (tenant_id, financial_year);

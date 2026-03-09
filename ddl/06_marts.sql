@@ -210,41 +210,47 @@ REFRESH EVERY 1000 YEAR
 TO punjab_property_tax.mart_property_demand_vs_assessed_by_fy
 EMPTY
 AS
-WITH demand_counts AS
-(
-    SELECT
-        tenant_id,
-        financial_year,
-        count() AS properties_with_demand
-    FROM punjab_property_tax.mart_properties_with_demand_by_fy
-    GROUP BY
-        tenant_id,
-        financial_year
-),
+WITH demand_properties AS
+ (
+     SELECT DISTINCT
+         tenant_id,
+         financial_year,
+         properties_with_demand AS property_id
+     FROM punjab_property_tax.mart_properties_with_demand_by_fy
+ ),
 
-property_counts AS
-(
-    SELECT
-        tenant_id,
-        financialyear AS financial_year,
-        countDistinct(propertyid) AS total_properties_assessed
-    FROM punjab_property_tax.property_assessment_entity FINAL
-    WHERE status = 'ACTIVE'
-    GROUP BY
-        tenant_id,
-        financial_year
-)
+ assessed_properties AS
+ (
+     SELECT DISTINCT
+         tenant_id,
+         financialyear AS financial_year,
+         propertyid AS property_id
+     FROM punjab_property_tax.property_assessment_entity FINAL
+     WHERE status = 'ACTIVE'
+ ),
 
-SELECT
-    d.tenant_id,
-    d.financial_year,
-    p.total_properties_assessed,
-    d.properties_with_demand
-FROM demand_counts d
-INNER JOIN property_counts p
-    ON d.tenant_id = p.tenant_id
-   AND d.financial_year = p.financial_year
-ORDER BY
-    d.tenant_id,
-    d.financial_year;
+ combined AS
+ (
+     SELECT
+         if(d.tenant_id != '', d.tenant_id, a.tenant_id) AS tenant_id,
+         if(d.financial_year != '', d.financial_year, a.financial_year) AS financial_year,
+         d.property_id AS demand_property_id,
+         a.property_id AS assessed_property_id
+     FROM demand_properties d
+     FULL OUTER JOIN assessed_properties a
+         ON d.tenant_id = a.tenant_id
+        AND d.financial_year = a.financial_year
+        AND d.property_id = a.property_id
+ )
+
+ SELECT
+     tenant_id,
+     financial_year,
+     countIf(assessed_property_id != '') AS total_properties_assessed,
+     countIf(demand_property_id != '') AS total_properties_with_demand,
+     countIf(demand_property_id != '' AND assessed_property_id = '') AS total_properties_with_demand_no_assessment,
+     countIf(assessed_property_id != '' AND demand_property_id = '') AS total_properties_with_assessment_no_demand
+ FROM combined
+ GROUP BY tenant_id, financial_year
+ ORDER BY tenant_id, financial_year;
 
