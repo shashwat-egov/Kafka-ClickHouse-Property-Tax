@@ -114,6 +114,8 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_property_risk_summary
     ownership_changes UInt32,
     area_changes UInt32,
     workflow_reopens UInt32,
+    usage_category_changes UInt32,
+    owner_count_changed UInt32,
     risk_score UInt8
 )
 ENGINE = MergeTree
@@ -124,14 +126,15 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_property_changes_by_fy
 (
     data_refresh_date Date DEFAULT today(),
     tenant_id LowCardinality(String),
-    property_id String,
     property_type LowCardinality(String),
     financial_year LowCardinality(String),
     total_updates UInt32,
     ownership_changes UInt32,
     area_changes UInt32,
     workflow_reopens UInt32,
-    risk_score UInt8
+    usage_category_changes UInt32,
+    owner_count_changed UInt32
+
 )
 ENGINE = MergeTree
 ORDER BY (tenant_id, property_type, financial_year, property_id)
