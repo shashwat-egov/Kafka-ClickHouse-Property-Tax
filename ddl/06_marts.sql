@@ -280,8 +280,7 @@ WITH demand_properties AS
      countIf(demand_property_id != '' AND assessed_property_id = '') AS total_properties_with_demand_no_assessment,
      countIf(assessed_property_id != '' AND demand_property_id = '') AS total_properties_with_assessment_no_demand
  FROM combined
- GROUP BY tenant_id, financial_year
- ORDER BY tenant_id, financial_year;
+ GROUP BY tenant_id, financial_year;
 
 
 -- ############################################################################
