@@ -1,6 +1,10 @@
-# Property Tax Analytics Pipeline
+# CLAUDE.md
 
-Append-only analytical pipeline using ClickHouse with a Bronze-Silver-Gold layered architecture. Silver tables are enriched nightly via Airflow; mart RMVs are refreshed sequentially after silver ingestion completes.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+Append-only analytical pipeline for Punjab property tax data using ClickHouse with a Bronze-Silver-Gold layered architecture. Silver tables are enriched nightly via Airflow; mart RMVs are refreshed sequentially after silver ingestion completes.
 
 ## Quick Start
 
@@ -32,14 +36,14 @@ Kafka → Ingestion MVs → Raw Tables (Bronze)
 - **Mart refresh**: After all silver tables are populated, RMVs are triggered **one by one sequentially** (each waits for the previous to complete before starting)
 - **Manual refresh**:
   ```sql
-  SYSTEM REFRESH VIEW replacing_test.rmv_mart_<name>;
+  SYSTEM REFRESH VIEW punjab_property_tax.rmv_mart_<name>;
   SELECT view, status FROM system.view_refreshes WHERE view LIKE 'rmv_%';
   ```
 
 ## File Structure
 
 ```
-├── updated_ddl/
+├── ddl/
 │   ├── 01_kafka.sql              # Kafka engine tables (JSONAsString)
 │   ├── 02_raw_tables.sql         # Bronze: append-only raw JSON storage
 │   ├── 03_ingestion_mvs.sql      # Kafka → Raw MVs (no parsing)
@@ -56,9 +60,9 @@ Kafka → Ingestion MVs → Raw Tables (Bronze)
 └── CLAUDE.md
 ```
 
-## Schema
+## Schemas
 
-All tables live under the `replacing_test` schema.
+All tables live under the `punjab_property_tax` schema.
 
 ## Tables
 
@@ -78,18 +82,66 @@ All tables live under the `replacing_test` schema.
 | `property_address_entity` | ReplacingMergeTree | `(tenant_id, property_id)` | Denormalized property + address |
 | `property_unit_entity` | ReplacingMergeTree | `(tenant_id, unit_id)` | Property units |
 | `property_owner_entity` | ReplacingMergeTree | `(tenant_id, owner_info_uuid)` | Property owners |
-| `demand_with_details_entity` | ReplacingMergeTree | `(tenant_id, demand_id)` | Denormalized demand + breakdowns |
+| `demand_with_details_entity` | ReplacingMergeTree | `(tenant_id, demand_id)` | Demand + tax breakdowns |
+| `payment_with_details_entity` | ReplacingMergeTree | `(tenant_id, payment_id)` | Payment details |
+| `bill_entity` | ReplacingMergeTree | `(tenant_id, bill_id)` | Bills |
+| `property_assessment_entity` | ReplacingMergeTree | `(tenant_id, assessmentnumber)` | Assessments by FY |
+| `property_audit_entity` | MergeTree | `(tenant_id, property_id, audit_created_time)` | Append-only audit trail |
 
-### Gold (Marts)
+All ReplacingMergeTree tables use `last_modified_time` as the version column. `property_audit_entity` is the exception — it's append-only MergeTree (not deduped) since it tracks change history.
+
+### Gold Marts (punjab_property_tax)
 
 | Table | RMV | Purpose |
 |-------|-----|---------|
-| `mart_property_agg` | `rmv_mart_property_agg` | Property count by tenant/ownership/usage |
+| `mart_active_property_distribution_summary` | `rmv_mart_active_property_distribution_summary` | Active property count by tenant/type/ownership/usage |
 | `mart_new_properties_by_fy` | `rmv_mart_new_properties_by_fy` | New properties per financial year |
-| `mart_demand_value_by_fy` | `rmv_mart_demand_values_by_fy` | Demand/collection/outstanding by FY |
+| `mart_demand_and_collection_summary` | `rmv_mart_demand_and_collection_summary` | Demand/collection/outstanding by FY |
 | `mart_collections_by_month` | `rmv_mart_collections_by_month` | Monthly collection totals |
 | `mart_properties_with_demand_by_fy` | `rmv_mart_properties_with_demand_by_fy` | Properties with active demand by FY |
 | `mart_defaulters` | `rmv_mart_defaulters` | Properties with outstanding balances |
+| `mart_property_change_metrics` | `rmv_property_change_metrics` | Per-property change detection from audit trail |
+| `mart_property_risk_summary` | `rmv_property_risk_summary` | Risk scores from aggregated change flags |
+| `mart_property_risk_summary_by_fy` | `rmv_property_risk_summary_by_fy` | Risk scores from aggregated change flags by FY |
+| `mart_property_demand_vs_assessed_by_fy` | `rmv_property_demand_vs_assessed_by_fy` | Properties with demand vs properties assessed by FY |
+| `mart_assessment_summary_by_fy` | `rmv_mart_assessment_summary_by_fy` | Assessment counts by FY/property type/channel, owner vs others |
+| `mart_payment_summary_by_fy` | `rmv_mart_payment_summary_by_fy` | Payment metrics by FY/property type/payment mode |
+| `mart_rebate_summary_by_fy` | `rmv_mart_rebate_summary_by_fy` | Average rebate size by FY/property type |
+
+**Mart dependencies**:
+- `rmv_property_risk_summary` reads from `mart_property_change_metrics` — must refresh after `rmv_property_change_metrics`
+- `rmv_property_risk_summary_by_fy` reads from `mart_property_change_metrics` — must refresh after `rmv_property_change_metrics`
+- `rmv_property_demand_vs_assessed_by_fy` reads from `mart_properties_with_demand_by_fy` and `property_assessment_entity` — must refresh after `rmv_mart_properties_with_demand_by_fy`
+
+## RMV Refresh
+
+RMVs use `REFRESH EVERY 1000 YEAR` (effectively manual-only). Airflow triggers them sequentially after silver enrichment.
+
+```sql
+-- Manual refresh
+SYSTEM REFRESH VIEW punjab_property_tax.rmv_mart_active_property_distribution_summary;
+
+-- Check status
+SELECT view, status FROM system.view_refreshes WHERE view LIKE 'rmv_%';
+```
+
+## RMV Refresh Order (Sequential via Airflow)
+
+After silver enrichment completes, Airflow triggers each RMV one by one:
+
+1. `rmv_mart_active_property_distribution_summary`
+2. `rmv_mart_new_properties_by_fy`
+3. `rmv_mart_demand_and_collection_summary`
+4. `rmv_mart_collections_by_month`
+5. `rmv_mart_properties_with_demand_by_fy`
+6. `rmv_mart_defaulters`
+7. `rmv_property_change_metrics`
+8. `rmv_property_risk_summary` ← depends on #7
+9. `rmv_property_risk_summary_by_fy` ← depends on #7
+10. `rmv_property_demand_vs_assessed_by_fy` ← depends on #5
+11. `rmv_mart_assessment_summary_by_fy`
+12. `rmv_mart_payment_summary_by_fy`
+13. `rmv_mart_rebate_summary_by_fy`
 
 ## Constraints
 
@@ -111,6 +163,9 @@ All tables live under the `replacing_test` schema.
 | Unit | `(tenant_id, unit_id)` | `last_modified_time` |
 | Owner | `(tenant_id, owner_info_uuid)` | `last_modified_time` |
 | Demand+Details | `(tenant_id, demand_id)` | `last_modified_time` |
+| Payment+Details | `(tenant_id, payment_id)` | `last_modified_time` |
+| Bill | `(tenant_id, bill_id)` | `last_modified_time` |
+| Assessment | `(tenant_id, assessmentnumber)` | `last_modified_time` |
 
 ## Core Pattern
 
@@ -130,14 +185,3 @@ FROM entity_table FINAL
 WHERE ...
 GROUP BY ...;
 ```
-
-## RMV Refresh Order (Sequential via Airflow)
-
-After silver enrichment completes, Airflow triggers each RMV one by one:
-
-1. `rmv_mart_property_agg`
-2. `rmv_mart_new_properties_by_fy`
-3. `rmv_mart_demand_values_by_fy`
-4. `rmv_mart_collections_by_month`
-5. `rmv_mart_properties_with_demand_by_fy`
-6. `rmv_mart_defaulters`

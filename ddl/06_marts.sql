@@ -133,46 +133,6 @@ WHERE (business_service = 'PT') AND (demand_status = 'ACTIVE') AND (outstanding_
 
 
 
-
-CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_mart_property_demand_coverage_by_fy
-REFRESH EVERY 1000 YEAR
-TO punjab_property_tax.mart_property_demand_coverage_by_fy
-EMPTY
-AS
-WITH
-    demand_counts AS
-    (
-        SELECT
-            tenant_id,
-            financial_year,
-            count() AS properties_with_demand
-        FROM punjab_property_tax.mart_properties_with_demand_by_fy
-        GROUP BY
-            tenant_id,
-            financial_year
-    ),
-    property_base AS
-    (
-        SELECT
-            tenant_id,
-            financial_year,
-            sum(new_property_count) OVER (PARTITION BY tenant_id ORDER BY financial_year ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS total_active_properties
-        FROM punjab_property_tax.mart_new_properties_by_fy
-    )
-SELECT
-    d.tenant_id,
-    d.financial_year,
-    p.total_active_properties,
-    d.properties_with_demand,
-    p.total_active_properties - d.properties_with_demand AS properties_without_demand,
-    round(d.properties_with_demand / p.total_active_properties, 4) AS coverage_ratio
-FROM demand_counts AS d
-INNER JOIN property_base AS p ON (d.tenant_id = p.tenant_id) AND (d.financial_year = p.financial_year)
-ORDER BY
-    d.tenant_id ASC,
-    d.financial_year ASC;
-
-
 -- ############################################################################
 -- CHANGE METRICS RMVs (manual refresh only via SYSTEM REFRESH VIEW)
 -- ############################################################################
@@ -228,10 +188,12 @@ SELECT
     property_id,
     property_type,
 
-    count() AS total_updates,
+    sum(ownership_category_changed) + sum(area_changed) + sum(workflow_state_changed) + sum(usage_category_changed) + sum(owners_changed) AS total_updates,
     sum(ownership_category_changed) AS ownership_changes,
     sum(area_changed) AS area_changes,
     sum(workflow_state_changed) AS workflow_reopens,
+    sum(usage_category_changed) as usage_category_changes,
+    sum(owners_changed) as owner_count_changed,
 
     if(
         sum(ownership_category_changed) > 1 OR
@@ -241,3 +203,207 @@ SELECT
     ) AS risk_score
 FROM punjab_property_tax.mart_property_change_metrics
 GROUP BY tenant_id, property_id, property_type;
+
+-- Layer 3b: Change Metrics → Risk Summary by Financial Year
+-- Same as rmv_property_risk_summary but aggregated per FY (derived from audit_created_time).
+-- Depends on rmv_property_change_metrics completing first.
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_property_changes_by_fy
+REFRESH EVERY 1000 YEAR
+TO punjab_property_tax.mart_property_changes_by_fy
+EMPTY
+AS
+SELECT
+    tenant_id,
+    property_type,
+    concat(
+    toString(toYear(audit_created_time) - if(toMonth(audit_created_time) < 4, 1, 0)),
+    '-',
+    substring(toString(toYear(audit_created_time) + if(toMonth(audit_created_time) >= 4, 1, 0)), 3, 2)
+    ) AS financial_year,    
+        sum(ownership_category_changed) + sum(area_changed) + sum(workflow_state_changed) + sum(usage_category_changed) + sum(owners_changed) AS total_updates,
+        sum(ownership_category_changed) AS ownership_changes,
+        sum(area_changed) AS area_changes,
+        sum(workflow_state_changed) AS workflow_reopens,
+        sum(usage_category_changed) as usage_category_changes,
+        sum(owners_changed) as owner_count_changed,  
+FROM punjab_property_tax.mart_property_change_metrics
+GROUP BY tenant_id, property_type, financial_year;
+
+-- This mart shows the number of properties with demand and number of properties that were assessed
+-- for each tenant and financial year 
+
+--TODO: Validate it for one or two tenant manually
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_property_demand_vs_assessed_by_fy
+REFRESH EVERY 1000 YEAR
+TO punjab_property_tax.mart_property_demand_vs_assessed_by_fy
+EMPTY
+AS
+WITH demand_properties AS
+ (
+     SELECT DISTINCT
+         tenant_id,
+         financial_year,
+         properties_with_demand AS property_id
+     FROM punjab_property_tax.mart_properties_with_demand_by_fy
+ ),
+
+ assessed_properties AS
+ (
+     SELECT DISTINCT
+         tenant_id,
+         financialyear AS financial_year,
+         propertyid AS property_id
+     FROM punjab_property_tax.property_assessment_entity FINAL
+     WHERE status = 'ACTIVE'
+ ),
+
+ combined AS
+ (
+     SELECT
+         if(d.tenant_id != '', d.tenant_id, a.tenant_id) AS tenant_id,
+         if(d.financial_year != '', d.financial_year, a.financial_year) AS financial_year,
+         d.property_id AS demand_property_id,
+         a.property_id AS assessed_property_id
+     FROM demand_properties d
+     FULL OUTER JOIN assessed_properties a
+         ON d.tenant_id = a.tenant_id
+        AND d.financial_year = a.financial_year
+        AND d.property_id = a.property_id
+ )
+
+ SELECT
+     tenant_id,
+     financial_year,
+     countIf(assessed_property_id != '') AS total_properties_assessed,
+     countIf(demand_property_id != '') AS total_properties_with_demand,
+     countIf(demand_property_id != '' AND assessed_property_id = '') AS total_properties_with_demand_no_assessment,
+     countIf(assessed_property_id != '' AND demand_property_id = '') AS total_properties_with_assessment_no_demand
+ FROM combined
+ GROUP BY tenant_id, financial_year;
+
+
+-- ############################################################################
+-- ASSESSMENT SUMMARY BY FY
+-- ############################################################################
+-- Counts assessments by financial year, property type, and channel,
+-- split into assessments done by the property owner vs others.
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_mart_assessment_summary_by_fy
+REFRESH EVERY 1000 YEAR
+TO punjab_property_tax.mart_assessment_summary_by_fy
+EMPTY
+AS
+WITH assessments AS (
+    SELECT tenant_id, financialyear, propertyid, channel, created_by
+    FROM punjab_property_tax.property_assessment_entity FINAL
+    WHERE status = 'ACTIVE'
+        AND financialyear != ''
+),
+property_types AS (
+    SELECT DISTINCT tenant_id, property_id, property_type
+    FROM punjab_property_tax.property_owner_entity FINAL
+),
+owner_users AS (
+    SELECT DISTINCT tenant_id, property_id, user_id
+    FROM punjab_property_tax.property_owner_entity FINAL
+)
+SELECT
+    a.tenant_id AS tenant_id,
+    a.financialyear AS financial_year,
+    pt.property_type AS property_type,
+    a.channel AS channel,
+    count() AS total_assessments,
+    countIf(o.user_id != '') AS assessments_by_owner,
+    countIf(o.user_id = '') AS assessments_by_others
+FROM assessments AS a
+LEFT JOIN property_types AS pt
+    ON a.tenant_id = pt.tenant_id AND a.propertyid = pt.property_id
+LEFT JOIN owner_users AS o
+    ON a.tenant_id = o.tenant_id AND a.propertyid = o.property_id AND a.created_by = o.user_id
+GROUP BY a.tenant_id, a.financialyear, pt.property_type, a.channel;
+
+
+-- ############################################################################
+-- PAYMENT SUMMARY BY FY
+-- ############################################################################
+-- Payment metrics by financial year, property type, and payment mode.
+-- Part payment: total_amount_paid < total_due.
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_mart_payment_summary_by_fy
+REFRESH EVERY 1000 YEAR
+TO punjab_property_tax.mart_payment_summary_by_fy
+EMPTY
+AS
+WITH payments AS (
+    SELECT tenant_id, payment_id,
+           concat(
+               toString(toYear(transaction_date) - if(toMonth(transaction_date) < 4, 1, 0)),
+               '-',
+               substring(toString(toYear(transaction_date) + if(toMonth(transaction_date) >= 4, 1, 0)), 3, 2)
+           ) AS financial_year,
+           payment_mode, total_amount_paid, total_due, billid
+    FROM punjab_property_tax.payment_with_details_entity FINAL
+    WHERE businessservice = 'PT'
+),
+bills AS (
+    SELECT tenant_id, bill_id, consumercode AS property_id
+    FROM punjab_property_tax.bill_entity FINAL
+),
+property_types AS (
+    SELECT tenant_id, property_id, property_type
+    FROM punjab_property_tax.property_address_entity FINAL
+)
+SELECT
+    p.tenant_id AS tenant_id,
+    p.financial_year AS financial_year,
+    pt.property_type AS property_type,
+    p.payment_mode AS payment_mode,
+    count() AS total_payments,
+    sum(p.total_amount_paid) AS total_amount_collected,
+    countIf(p.total_amount_paid < p.total_due) AS total_part_payments,
+    sumIf(p.total_amount_paid, p.total_amount_paid < p.total_due) AS total_amount_collected_in_part_payments
+FROM payments AS p
+LEFT JOIN bills AS b
+    ON p.tenant_id = b.tenant_id AND p.billid = b.bill_id
+LEFT JOIN property_types AS pt
+    ON p.tenant_id = pt.tenant_id AND b.property_id = pt.property_id
+GROUP BY p.tenant_id, p.financial_year, pt.property_type, p.payment_mode;
+
+
+-- ############################################################################
+-- REBATE SUMMARY BY FY
+-- ############################################################################
+-- Average rebate size by financial year and property type.
+-- Rebate = abs(pt_time_rebate) + abs(pt_adhoc_rebate).
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_mart_rebate_summary_by_fy
+REFRESH EVERY 1000 YEAR
+TO punjab_property_tax.mart_rebate_summary_by_fy
+EMPTY
+AS
+WITH demands AS (
+    SELECT tenant_id, demand_id, consumer_code, financial_year,
+           abs(pt_time_rebate) + abs(pt_adhoc_rebate) AS rebate_amount
+    FROM punjab_property_tax.demand_with_details_entity FINAL
+    WHERE business_service = 'PT'
+      AND demand_status = 'ACTIVE'
+      AND financial_year != ''
+      AND (pt_time_rebate != 0 OR pt_adhoc_rebate != 0)
+),
+property_types AS (
+    SELECT tenant_id, property_id, property_type
+    FROM punjab_property_tax.property_address_entity FINAL
+)
+SELECT
+    d.tenant_id AS tenant_id,
+    d.financial_year AS financial_year,
+    pt.property_type AS property_type,
+    avg(d.rebate_amount) AS avg_rebate_amount,
+    sum(d.rebate_amount) AS total_rebate_amount,
+    count() AS demands_with_rebate
+FROM demands AS d
+LEFT JOIN property_types AS pt
+    ON d.tenant_id = pt.tenant_id AND d.consumer_code = pt.property_id
+GROUP BY d.tenant_id, d.financial_year, pt.property_type;
+

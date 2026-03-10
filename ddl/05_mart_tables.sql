@@ -70,20 +70,6 @@ ORDER BY (tenant_id, financial_year)
 SETTINGS index_granularity = 8192;
 
 
-CREATE TABLE punjab_property_tax.mart_property_demand_coverage_by_fy
-(
-    data_refresh_date Date DEFAULT today(),
-
-    tenant_id LowCardinality(String),
-    financial_year LowCardinality(String),
-
-    total_active_properties UInt64,
-    properties_with_demand UInt64,
-    properties_without_demand UInt64,
-    coverage_ratio Float64,
-)
-ENGINE = MergeTree
-ORDER BY (tenant_id, financial_year);
 
 
 CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_defaulters
@@ -128,8 +114,88 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_property_risk_summary
     ownership_changes UInt32,
     area_changes UInt32,
     workflow_reopens UInt32,
+    usage_category_changes UInt32,
+    owner_count_changed UInt32,
     risk_score UInt8
 )
 ENGINE = MergeTree
 ORDER BY (tenant_id, property_type, property_id)
+SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_property_changes_by_fy
+(
+    data_refresh_date Date DEFAULT today(),
+    tenant_id LowCardinality(String),
+    property_type LowCardinality(String),
+    financial_year LowCardinality(String),
+    total_updates UInt32,
+    ownership_changes UInt32,
+    area_changes UInt32,
+    workflow_reopens UInt32,
+    usage_category_changes UInt32,
+    owner_count_changed UInt32
+
+)
+ENGINE = MergeTree
+ORDER BY (tenant_id, property_type, financial_year)
+SETTINGS index_granularity = 8192;
+
+CREATE TABLE punjab_property_tax.mart_property_demand_vs_assessed_by_fy
+(
+    data_refresh_date Date DEFAULT today(),
+
+    tenant_id LowCardinality(String),
+    financial_year LowCardinality(String),
+
+    total_properties_assessed UInt64,
+    total_properties_with_demand UInt64,
+    total_properties_with_demand_no_assessment UInt64, -- properties with demand but no assessment
+    total_properties_with_assessment_no_demand UInt64 -- properties with assessment but no demand
+)
+ENGINE = MergeTree
+ORDER BY (tenant_id, financial_year);
+
+CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_assessment_summary_by_fy
+(
+    data_refresh_date Date DEFAULT today(),
+    tenant_id LowCardinality(String),
+    financial_year LowCardinality(String),
+    property_type LowCardinality(String),
+    channel LowCardinality(String),
+    total_assessments UInt64,
+    assessments_by_owner UInt64,
+    assessments_by_others UInt64
+)
+ENGINE = MergeTree
+ORDER BY (tenant_id, financial_year, property_type, channel)
+SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_payment_summary_by_fy
+(
+    data_refresh_date Date DEFAULT today(),
+    tenant_id LowCardinality(String),
+    financial_year LowCardinality(String),
+    property_type LowCardinality(String),
+    payment_mode LowCardinality(String),
+    total_payments UInt64,
+    total_amount_collected Decimal(18, 2),
+    total_part_payments UInt64,
+    total_amount_collected_in_part_payments Decimal(18, 2)
+)
+ENGINE = MergeTree
+ORDER BY (tenant_id, financial_year, property_type, payment_mode)
+SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_rebate_summary_by_fy
+(
+    data_refresh_date Date DEFAULT today(),
+    tenant_id LowCardinality(String),
+    financial_year LowCardinality(String),
+    property_type LowCardinality(String),
+    avg_rebate_amount Decimal(18, 4),
+    total_rebate_amount Decimal(18, 4),
+    demands_with_rebate UInt64
+)
+ENGINE = MergeTree
+ORDER BY (tenant_id, financial_year, property_type)
 SETTINGS index_granularity = 8192;
