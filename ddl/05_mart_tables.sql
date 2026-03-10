@@ -137,7 +137,7 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_property_changes_by_fy
 
 )
 ENGINE = MergeTree
-ORDER BY (tenant_id, property_type, financial_year, property_id)
+ORDER BY (tenant_id, property_type, financial_year)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE punjab_property_tax.mart_property_demand_vs_assessed_by_fy
