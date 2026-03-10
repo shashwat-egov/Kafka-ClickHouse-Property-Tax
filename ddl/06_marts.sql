@@ -188,10 +188,12 @@ SELECT
     property_id,
     property_type,
 
-    count() AS total_updates,
+    sum(ownership_category_changed) + sum(area_changed) + sum(workflow_state_changed) + sum(usage_category_changed) + sum(owners_changed) AS total_updates,
     sum(ownership_category_changed) AS ownership_changes,
     sum(area_changed) AS area_changes,
     sum(workflow_state_changed) AS workflow_reopens,
+    sum(usage_category_changed) as usage_category_changes,
+    sum(owners_changed) as owner_count_changed,
 
     if(
         sum(ownership_category_changed) > 1 OR
@@ -206,36 +208,32 @@ GROUP BY tenant_id, property_id, property_type;
 -- Same as rmv_property_risk_summary but aggregated per FY (derived from audit_created_time).
 -- Depends on rmv_property_change_metrics completing first.
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_property_risk_summary_by_fy
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_property_changes_by_fy
 REFRESH EVERY 1000 YEAR
-TO punjab_property_tax.mart_property_risk_summary_by_fy
+TO punjab_property_tax.mart_property_changes_by_fy
 EMPTY
 AS
 SELECT
     tenant_id,
-    property_id,
     property_type,
     concat(
     toString(toYear(audit_created_time) - if(toMonth(audit_created_time) < 4, 1, 0)),
     '-',
     substring(toString(toYear(audit_created_time) + if(toMonth(audit_created_time) >= 4, 1, 0)), 3, 2)
     ) AS financial_year,    
-        count() AS total_updates,
+        sum(ownership_category_changed) + sum(area_changed) + sum(workflow_state_changed) + sum(usage_category_changed) + sum(owners_changed) AS total_updates,
         sum(ownership_category_changed) AS ownership_changes,
         sum(area_changed) AS area_changes,
-        sum(workflow_state_changed) AS workflow_reopens,    
-    if(
-        sum(ownership_category_changed) > 1 OR
-        sum(area_changed) > 2 OR
-        sum(workflow_state_changed) > 1,
-        1, 0
-    ) AS risk_score
+        sum(workflow_state_changed) AS workflow_reopens,
+        sum(usage_category_changed) as usage_category_changes,
+        sum(owners_changed) as owner_count_changed,  
 FROM punjab_property_tax.mart_property_change_metrics
-GROUP BY tenant_id, property_id, property_type, financial_year;
+GROUP BY tenant_id, property_type, financial_year;
 
 -- This mart shows the number of properties with demand and number of properties that were assessed
 -- for each tenant and financial year 
 
+--TODO: Validate it for one or two tenant manually
 CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_property_demand_vs_assessed_by_fy
 REFRESH EVERY 1000 YEAR
 TO punjab_property_tax.mart_property_demand_vs_assessed_by_fy
@@ -364,7 +362,8 @@ SELECT
     p.payment_mode AS payment_mode,
     count() AS total_payments,
     sum(p.total_amount_paid) AS total_amount_collected,
-    countIf(p.total_amount_paid < p.total_due) AS total_part_payments
+    countIf(p.total_amount_paid < p.total_due) AS total_part_payments,
+    sumIf(p.total_amount_paid, p.total_amount_paid < p.total_due) AS total_amount_collected_in_part_payments
 FROM payments AS p
 LEFT JOIN bills AS b
     ON p.tenant_id = b.tenant_id AND p.billid = b.bill_id
