@@ -160,7 +160,7 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.demand_with_details_entity
     total_tax_amount Decimal(12, 2),
     total_collection_amount Decimal(12, 2),
 
-
+    -- Tax amount by Tax Head codes
     pt_tax Decimal(18,4),
     pt_cancer_cess Decimal(18,4),
     pt_fire_cess Decimal(18,4),
@@ -175,6 +175,22 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.demand_with_details_entity
     pt_adhoc_penalty Decimal(18,4),
     pt_adhoc_rebate Decimal(18,4),
     pt_time_interest Decimal(18,4),
+
+    -- Collection amount by Tax Head codes
+    pt_tax_collection Decimal(18,4),
+    pt_cancer_cess_collection Decimal(18,4),
+    pt_fire_cess_collection Decimal(18,4),
+    pt_roundoff_collection Decimal(18,4),
+    pt_owner_exemption_collection Decimal(18,4),
+    pt_unit_usage_exemption_collection Decimal(18,4),
+    pt_advance_carryforward_collection Decimal(18,4),
+    pt_decimal_ceiling_debit_collection Decimal(18,4),
+    pt_time_rebate_collection Decimal(18,4),
+    pt_decimal_ceiling_credit_collection Decimal(18,4),
+    pt_time_penalty_collection Decimal(18,4),
+    pt_adhoc_penalty_collection Decimal(18,4),
+    pt_adhoc_rebate_collection Decimal(18,4),
+    pt_time_interest_collection Decimal(18,4),
 
     -- Derived columns
     outstanding_amount Decimal(18, 4),
