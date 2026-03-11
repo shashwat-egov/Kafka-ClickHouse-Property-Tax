@@ -150,7 +150,6 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.demand_with_details_entity
     tax_period_from DateTime64(3),
     tax_period_to DateTime64(3),
     demand_status LowCardinality(String),
-    is_payment_completed UInt8,
     financial_year LowCardinality(String),
     minimum_amount_payable Decimal(18, 4),
     bill_expiry_time Int64,
