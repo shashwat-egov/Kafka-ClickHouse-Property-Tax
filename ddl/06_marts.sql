@@ -89,14 +89,12 @@ EMPTY
 AS
 SELECT
     tenant_id,
-    formatDateTime(last_modified_time, '%Y-%m') AS year_month,
-    sum(total_collection_amount) AS total_collected_amount
-FROM punjab_property_tax.demand_with_details_entity
-FINAL
-WHERE (total_collection_amount > 0) AND (demand_status = 'ACTIVE')
-GROUP BY
-    tenant_id,
-    year_month;
+    formatDateTime(created_time, '%Y-%m') AS year_month,
+    payment_status,
+    sum(total_amount_paid) AS total_collected_amount
+FROM punjab_property_tax.payment_with_details_entity FINAL
+WHERE businessservice = 'PT'
+GROUP BY tenant_id, year_month, payment_status;
 
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_mart_properties_with_demand_by_fy
@@ -407,3 +405,16 @@ LEFT JOIN property_types AS pt
     ON d.tenant_id = pt.tenant_id AND d.consumer_code = pt.property_id
 GROUP BY d.tenant_id, d.financial_year, pt.property_type;
 
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_mart_daily_collection_summary
+REFRESH EVERY 1000 YEAR
+TO punjab_property_tax.mart_daily_collection_summary
+EMPTY
+AS
+SELECT
+    tenant_id,
+    payment_status,
+    toDate(created_time) AS collection_date,
+    sum(total_amount_paid) AS total_amount
+FROM punjab_property_tax.payment_with_details_entity FINAL
+WHERE businessservice = 'PT'
+GROUP BY tenant_id, payment_status, collection_date;

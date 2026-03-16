@@ -51,10 +51,11 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_collections_by_month
     data_refresh_date Date DEFAULT today(),
     tenant_id LowCardinality(String),
     year_month LowCardinality(String),
+    payment_status LowCardinality(String),
     total_collected_amount Decimal(18, 4)
 )
 ENGINE = MergeTree
-ORDER BY (tenant_id, year_month)
+ORDER BY (tenant_id, year_month, payment_status)
 SETTINGS index_granularity = 8192;
 
 
@@ -198,4 +199,16 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_rebate_summary_by_fy
 )
 ENGINE = MergeTree
 ORDER BY (tenant_id, financial_year, property_type)
+SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_daily_collection_summary
+(
+    data_refresh_date Date DEFAULT today(),
+    tenant_id LowCardinality(String),
+    payment_status LowCardinality(String),
+    collection_date Date,
+    total_amount Decimal(18, 2)
+)
+ENGINE = MergeTree
+ORDER BY (tenant_id, payment_status, collection_date)
 SETTINGS index_granularity = 8192;
