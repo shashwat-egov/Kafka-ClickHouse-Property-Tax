@@ -205,10 +205,10 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_daily_collection_summary
 (
     data_refresh_date Date DEFAULT today(),
     tenant_id LowCardinality(String),
-    collection_date Date,
     payment_status LowCardinality(String),
+    collection_date Date,
     total_amount Decimal(18, 2)
 )
 ENGINE = MergeTree
-ORDER BY (tenant_id, collection_date, payment_status)
+ORDER BY (tenant_id, payment_status, collection_date)
 SETTINGS index_granularity = 8192;

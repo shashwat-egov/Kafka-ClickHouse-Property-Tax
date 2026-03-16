@@ -412,9 +412,9 @@ EMPTY
 AS
 SELECT
     tenant_id,
-    toDate(created_time) AS collection_date,
     payment_status,
+    toDate(created_time) AS collection_date,
     sum(total_amount_paid) AS total_amount
 FROM punjab_property_tax.payment_with_details_entity FINAL
 WHERE businessservice = 'PT'
-GROUP BY tenant_id, collection_date, payment_status;
+GROUP BY tenant_id, payment_status, collection_date;
