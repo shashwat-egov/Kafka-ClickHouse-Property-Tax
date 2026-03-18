@@ -50,8 +50,10 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_collections_by_month
 (
     data_refresh_date Date DEFAULT today(),
     tenant_id LowCardinality(String),
+    financial_year LowCardinality(String),
     year_month LowCardinality(String),
     payment_status LowCardinality(String),
+    total_payments UInt64,
     total_collected_amount Decimal(18, 4)
 )
 ENGINE = MergeTree
