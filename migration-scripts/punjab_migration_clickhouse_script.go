@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -31,9 +32,9 @@ func init() {
 }
 
 const (
-	// 20k rows per batch (5x smaller than migration script's 100k).
-	// Smaller batches = more frequent checkpoint saves = less work lost on VPN drop.
-	defaultBatchSize = 20_000
+	// 50k rows per batch — balances speed (fewer round trips) vs safety (checkpoint
+	// saves sort key after each batch, so at most 50k rows are re-synced on crash).
+	defaultBatchSize = 25_000
 	defaultWorkers   = 8
 )
 
@@ -75,6 +76,56 @@ func d(f float64) decimal.Decimal {
 
 func quoteLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// ─── Connection retry helper ────────────────────────────────────────────────
+
+const (
+	maxRetries    = 20
+	retryBaseWait = 15 * time.Second // first retry waits 15s, then 30s, capped at 60s
+	retryMaxWait  = 60 * time.Second
+)
+
+// isConnectionError returns true if the error looks like a network/connection issue.
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, keyword := range []string{
+		"connection reset", "connection refused", "broken pipe",
+		"i/o timeout", "eof", "no such host", "network is unreachable",
+		"connection timed out", "dial tcp", "write: connection reset",
+		"read: connection reset", "unexpected eof", "transport",
+	} {
+		if strings.Contains(msg, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+// withRetry executes fn up to maxRetries times on connection errors.
+// Non-connection errors are returned immediately.
+func withRetry(label string, fn func() error) error {
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		lastErr = fn()
+		if lastErr == nil {
+			return nil
+		}
+		if !isConnectionError(lastErr) {
+			return lastErr // not a connection error, don't retry
+		}
+		wait := retryBaseWait * time.Duration(attempt)
+		if wait > retryMaxWait {
+			wait = retryMaxWait
+		}
+		log.Printf("[RETRY] %s: attempt %d/%d failed: %v — waiting %s before retry",
+			label, attempt, maxRetries, lastErr, wait)
+		time.Sleep(wait)
+	}
+	return fmt.Errorf("giving up after %d retries: %w", maxRetries, lastErr)
 }
 
 // ─── Checkpoint store (local JSON file) ─────────────────────────────────────
@@ -345,7 +396,9 @@ func updateWatermark(ctx context.Context, chConn clickhouse.Conn, tableName stri
 
 func getMaxModifiedTime(ctx context.Context, pgPool *pgxpool.Pool, query string) (int64, error) {
 	var maxMs int64
-	err := pgPool.QueryRow(ctx, query).Scan(&maxMs)
+	err := withRetry("pg-max-modified-time", func() error {
+		return pgPool.QueryRow(ctx, query).Scan(&maxMs)
+	})
 	if err != nil {
 		return 0, fmt.Errorf("max modified time: %w", err)
 	}
@@ -434,12 +487,34 @@ func fetchPage(
 	Send() error
 	Abort() error
 }, result pageResult) {
-	rows, err := pgPool.Query(ctx, paginatedQuery)
+	var rows interface {
+		Next() bool
+		Scan(dest ...any) error
+		Close()
+		Err() error
+	}
+	err := withRetry("pg-query", func() error {
+		r, e := pgPool.Query(ctx, paginatedQuery)
+		if e != nil {
+			return e
+		}
+		rows = r
+		return nil
+	})
 	if err != nil {
 		return nil, pageResult{err: fmt.Errorf("query: %w", err)}
 	}
 
-	b, err := chConn.PrepareBatch(ctx, chInsert)
+	var b interface {
+		Append(v ...any) error
+		Send() error
+		Abort() error
+	}
+	err = withRetry("ch-prepare-batch", func() error {
+		var e error
+		b, e = chConn.PrepareBatch(ctx, chInsert)
+		return e
+	})
 	if err != nil {
 		rows.Close()
 		return nil, pageResult{err: fmt.Errorf("prepare batch: %w", err)}
@@ -557,12 +632,15 @@ func migrateForTenant(
 			prefetchCh <- prefetchResult{batch: b, result: r, page: p}
 		}(nextPage, nextKey)
 
-		if err := curBatch.Send(); err != nil {
+		sendErr := withRetry("ch-batch-send", func() error {
+			return curBatch.Send()
+		})
+		if sendErr != nil {
 			pf := <-prefetchCh
 			if pf.batch != nil {
 				_ = pf.batch.Abort()
 			}
-			return tenantTotal, fmt.Errorf("send: %w", err)
+			return tenantTotal, fmt.Errorf("send: %w", sendErr)
 		}
 
 		tenantTotal += int64(curResult.count)
@@ -760,10 +838,11 @@ func syncPropertyAddress(
 	}
 	log.Printf("[%s] Syncing delta: lastmodifiedtime > %d (up to %d)", table, watermark, newWatermark)
 
-	wf := watermarkFilter("p.lastmodifiedtime", watermark)
+	tenantWf := watermarkFilter("lastmodifiedtime", watermark)
+	dataWf := watermarkFilter("p.lastmodifiedtime", watermark)
 
 	tenantQuery := fmt.Sprintf(
-		`SELECT DISTINCT tenantid FROM eg_pt_property WHERE 1=1%s ORDER BY tenantid`, wf)
+		`SELECT DISTINCT tenantid FROM eg_pt_property WHERE 1=1%s ORDER BY tenantid`, tenantWf)
 
 	pgQuery := fmt.Sprintf(`
 		SELECT
@@ -787,7 +866,7 @@ func syncPropertyAddress(
 			COALESCE(a.latitude, 0)::float8, COALESCE(a.longitude, 0)::float8
 		FROM eg_pt_property p
 		LEFT JOIN eg_pt_address a ON p.id = a.propertyid
-		WHERE p.tenantid = $1%s`, wf)
+		WHERE p.tenantid = $1%s`, dataWf)
 
 	const chInsert = `INSERT INTO property_address_entity (
 		id, tenant_id, property_id, survey_id, account_id,
@@ -898,10 +977,11 @@ func syncPropertyUnit(
 	}
 	log.Printf("[%s] Syncing delta: lastmodifiedtime > %d (up to %d)", table, watermark, newWatermark)
 
-	wf := watermarkFilter("u.lastmodifiedtime", watermark)
+	tenantWf := watermarkFilter("lastmodifiedtime", watermark)
+	dataWf := watermarkFilter("u.lastmodifiedtime", watermark)
 
 	tenantQuery := fmt.Sprintf(
-		`SELECT DISTINCT tenantid FROM eg_pt_unit WHERE 1=1%s ORDER BY tenantid`, wf)
+		`SELECT DISTINCT tenantid FROM eg_pt_unit WHERE 1=1%s ORDER BY tenantid`, tenantWf)
 
 	pgQuery := fmt.Sprintf(`
 		SELECT
@@ -921,7 +1001,7 @@ func syncPropertyUnit(
 			COALESCE(p.nooffloors, 0)
 		FROM eg_pt_unit u
 		JOIN eg_pt_property p ON u.propertyid = p.id
-		WHERE u.tenantid = $1%s`, wf)
+		WHERE u.tenantid = $1%s`, dataWf)
 
 	const chInsert = `INSERT INTO property_unit_entity (
 		tenant_id, property_uuid, unit_id, floor_no, unit_type,
@@ -1030,10 +1110,11 @@ func syncPropertyOwner(
 	}
 	log.Printf("[%s] Syncing delta: lastmodifiedtime > %d (up to %d)", table, watermark, newWatermark)
 
-	wf := watermarkFilter("o.lastmodifiedtime", watermark)
+	tenantWf := watermarkFilter("lastmodifiedtime", watermark)
+	dataWf := watermarkFilter("o.lastmodifiedtime", watermark)
 
 	tenantQuery := fmt.Sprintf(
-		`SELECT DISTINCT tenantid FROM eg_pt_owner WHERE 1=1%s ORDER BY tenantid`, wf)
+		`SELECT DISTINCT tenantid FROM eg_pt_owner WHERE 1=1%s ORDER BY tenantid`, tenantWf)
 
 	pgQuery := fmt.Sprintf(`
 		SELECT
@@ -1050,7 +1131,7 @@ func syncPropertyOwner(
 			COALESCE(p.nooffloors, 0)
 		FROM eg_pt_owner o
 		JOIN eg_pt_property p ON o.propertyid = p.id
-		WHERE o.tenantid = $1%s`, wf)
+		WHERE o.tenantid = $1%s`, dataWf)
 
 	const chInsert = `INSERT INTO property_owner_entity (
 		tenant_id, property_uuid, owner_info_uuid, user_id, status,
@@ -1951,7 +2032,7 @@ func main() {
 	flag.StringVar(&pgPassword, "pg-password", "", "PostgreSQL password")
 	flag.StringVar(&chHost, "ch-host", "z0tz5tcsm5.ap-south-1.aws.clickhouse.cloud", "ClickHouse host")
 	flag.IntVar(&chPort, "ch-port", 9440, "ClickHouse port")
-	flag.StringVar(&chDB, "ch-db", "punjab_property_tax", "ClickHouse database")
+	flag.StringVar(&chDB, "ch-db", "increment_migration_test", "ClickHouse database")
 	flag.StringVar(&chUser, "ch-user", "default", "ClickHouse user")
 	flag.StringVar(&chPassword, "ch-password", "XJRDo8_ZPh_qs", "ClickHouse password")
 	flag.StringVar(&chProtocol, "ch-protocol", "auto", "ClickHouse protocol: auto, http, native")
@@ -2042,7 +2123,7 @@ func main() {
 	}
 	defer pgPool.Close()
 
-	if err := pgPool.Ping(ctx); err != nil {
+	if err := withRetry("pg-ping", func() error { return pgPool.Ping(ctx) }); err != nil {
 		log.Fatalf("PG ping: %v", err)
 	}
 	log.Printf("Connected to PostgreSQL (pool max=%d)", poolConfig.MaxConns)
@@ -2072,7 +2153,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Open ClickHouse: %v", err)
 	}
-	if err := chConn.Ping(ctx); err != nil {
+	if err := withRetry("ch-ping", func() error { return chConn.Ping(ctx) }); err != nil {
 		log.Fatalf("CH ping: %v", err)
 	}
 	log.Println("Connected to ClickHouse")
@@ -2109,8 +2190,39 @@ func main() {
 	}
 
 	// Global progress counter + reporter
+	log.Printf("CPU cores available: %d (GOMAXPROCS=%d)", runtime.NumCPU(), runtime.GOMAXPROCS(0))
+
 	var globalCounter int64
+	var peakAllocMB, peakSysMB uint64
+	var peakCPUPercent uint64 // stored as cpu% * 10 for 1-decimal precision via atomic
 	overallStart := time.Now()
+
+	// getCPUTime reads total process CPU time (user+system) from /proc/self/stat.
+	clkTck := 100.0 // sysconf(_SC_CLK_TCK), almost always 100 on Linux
+	getCPUTime := func() float64 {
+		data, err := os.ReadFile("/proc/self/stat")
+		if err != nil {
+			return 0
+		}
+		// Fields: pid (comm) state ... field[13]=utime field[14]=stime (in clock ticks)
+		// Find closing ')' to skip the comm field (which may contain spaces)
+		closeParen := strings.LastIndex(string(data), ")")
+		if closeParen < 0 {
+			return 0
+		}
+		fields := strings.Fields(string(data)[closeParen+2:]) // skip ") " then split
+		if len(fields) < 13 {
+			return 0
+		}
+		// fields[11] = utime, fields[12] = stime (0-indexed after state field)
+		var utime, stime float64
+		fmt.Sscanf(fields[11], "%f", &utime)
+		fmt.Sscanf(fields[12], "%f", &stime)
+		return (utime + stime) / clkTck // total CPU seconds
+	}
+
+	prevCPUTime := getCPUTime()
+	prevWallTime := time.Now()
 
 	done := make(chan struct{})
 	go func() {
@@ -2124,8 +2236,42 @@ func main() {
 				current := atomic.LoadInt64(&globalCounter)
 				elapsed := time.Since(overallStart).Seconds()
 				rate := float64(current) / elapsed
-				log.Printf("PROGRESS: %d total rows | %.0f rows/sec | %.0fs elapsed",
-					current, rate, elapsed)
+
+				// CPU usage since last tick
+				nowCPU := getCPUTime()
+				nowWall := time.Now()
+				wallDelta := nowWall.Sub(prevWallTime).Seconds()
+				cpuDelta := nowCPU - prevCPUTime
+				cpuPercent := 0.0
+				if wallDelta > 0 {
+					cpuPercent = (cpuDelta / wallDelta) * 100.0
+				}
+				prevCPUTime = nowCPU
+				prevWallTime = nowWall
+
+				// Track peak CPU (store as uint64 = cpu% * 10)
+				cpuPercentX10 := uint64(cpuPercent * 10)
+				if cpuPercentX10 > atomic.LoadUint64(&peakCPUPercent) {
+					atomic.StoreUint64(&peakCPUPercent, cpuPercentX10)
+				}
+
+				// Memory stats
+				var mem runtime.MemStats
+				runtime.ReadMemStats(&mem)
+				allocMB := mem.Alloc / 1024 / 1024
+				sysMB := mem.Sys / 1024 / 1024
+				if allocMB > atomic.LoadUint64(&peakAllocMB) {
+					atomic.StoreUint64(&peakAllocMB, allocMB)
+				}
+				if sysMB > atomic.LoadUint64(&peakSysMB) {
+					atomic.StoreUint64(&peakSysMB, sysMB)
+				}
+
+				peakCPU := float64(atomic.LoadUint64(&peakCPUPercent)) / 10.0
+				log.Printf("PROGRESS: %d total rows | %.0f rows/sec | %.0fs elapsed | cpu: %.1f%% (peak: %.1f%%) | mem: alloc=%dMB peak=%dMB sys=%dMB goroutines=%d",
+					current, rate, elapsed,
+					cpuPercent, peakCPU,
+					allocMB, atomic.LoadUint64(&peakAllocMB), sysMB, runtime.NumGoroutine())
 			}
 		}
 	}()
@@ -2201,6 +2347,9 @@ func main() {
 	if overallElapsed.Seconds() > 0 {
 		log.Printf("  Throughput: %.0f rows/sec", float64(totalRows)/overallElapsed.Seconds())
 	}
+	log.Printf("  Peak CPU: %.1f%% | Peak memory: alloc=%dMB sys=%dMB",
+		float64(atomic.LoadUint64(&peakCPUPercent))/10.0,
+		atomic.LoadUint64(&peakAllocMB), atomic.LoadUint64(&peakSysMB))
 	log.Println("==================================================")
 
 	// Flush any throttled checkpoint data to disk before exit
