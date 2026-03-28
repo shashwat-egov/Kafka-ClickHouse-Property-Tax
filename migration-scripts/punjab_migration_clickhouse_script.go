@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -103,14 +104,47 @@ func isConnectionError(err error) bool {
 	return false
 }
 
+// errReplicaConflict is a sentinel error indicating the PG read replica had a
+// replication conflict.  The caller should restart the table from the beginning
+// (not resume from checkpoint) because the replica's data was inconsistent.
+var errReplicaConflict = fmt.Errorf("replica conflict")
+
+// isReplicaConflictError returns true if the error is a PG read replica
+// conflict (happens when the primary is applying WAL changes that conflict
+// with a long-running SELECT on the replica).
+func isReplicaConflictError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, keyword := range []string{
+		"conflict with recovery",
+		"could not serialize access",
+		"the database system is in recovery mode",
+		"canceling statement due to conflict",
+	} {
+		if strings.Contains(msg, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
 // withRetry executes fn up to maxRetries times on connection errors.
 // Non-connection errors are returned immediately.
+// Replica conflict errors return errReplicaConflict so the caller can restart
+// the table from the beginning.
 func withRetry(label string, fn func() error) error {
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		lastErr = fn()
 		if lastErr == nil {
 			return nil
+		}
+		if isReplicaConflictError(lastErr) {
+			log.Printf("[REPLICA-CONFLICT] %s: %v — table must restart from beginning",
+				label, lastErr)
+			return fmt.Errorf("%w: %v", errReplicaConflict, lastErr)
 		}
 		if !isConnectionError(lastErr) {
 			return lastErr // not a connection error, don't retry
@@ -316,6 +350,14 @@ func (cs *CheckpointStore) Remove() error {
 		return nil
 	}
 	return err
+}
+
+// ResetTable removes a table's checkpoint so it restarts from the beginning.
+func (cs *CheckpointStore) ResetTable(table string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	delete(cs.data.Tables, table)
+	_ = cs.save()
 }
 
 // ─── Watermark management (ClickHouse) ──────────────────────────────────────
@@ -1907,7 +1949,7 @@ func main() {
 	flag.IntVar(&chPort, "ch-port", 9440, "ClickHouse port")
 	flag.StringVar(&chDB, "ch-db", "increment_migration_test", "ClickHouse database")
 	flag.StringVar(&chUser, "ch-user", "default", "ClickHouse user")
-	flag.StringVar(&chPassword, "ch-password", "XJRDo8_ZPh_qs", "ClickHouse password")
+	flag.StringVar(&chPassword, "ch-password", "", "ClickHouse password")
 	flag.StringVar(&chProtocol, "ch-protocol", "auto", "ClickHouse protocol: auto, http, native")
 	flag.BoolVar(&chSecure, "ch-secure", true, "Enable TLS for ClickHouse")
 	flag.IntVar(&batchSize, "batch-size", defaultBatchSize, "Rows per batch (default 25k for safer checkpointing)")
@@ -2174,6 +2216,22 @@ func main() {
 			defer wg.Done()
 			start := time.Now()
 			count, err := sFn(ctx, pgPool, chConn, batchSize, &globalCounter, cpStore)
+
+			// On replica conflict: reset checkpoint and restart table from beginning
+			if err != nil && errors.Is(err, errReplicaConflict) {
+				chTable := tableNameMap[tbl]
+				log.Printf("[%s] Replica conflict — resetting checkpoint and restarting from beginning", tbl)
+				cpStore.ResetTable(chTable)
+				// Also reset staging tables for demand
+				if tbl == "demand_details" {
+					cpStore.ResetTable("_stg_demand")
+					cpStore.ResetTable("_stg_demanddetail")
+				}
+				time.Sleep(5 * time.Minute) // wait for replica to catch up
+				start = time.Now()
+				count, err = sFn(ctx, pgPool, chConn, batchSize, &globalCounter, cpStore)
+			}
+
 			results[idx] = syncResult{
 				table:   tbl,
 				rows:    count,
