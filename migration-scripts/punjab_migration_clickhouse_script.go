@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -21,47 +23,38 @@ import (
 var istLocation *time.Location
 
 func init() {
-    var err error
-    istLocation, err = time.LoadLocation("Asia/Kolkata")
-    if err != nil {
-        panic("failed to load IST timezone")
-    }
+	var err error
+	istLocation, err = time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		panic("failed to load IST timezone")
+	}
 }
 
 const (
-	defaultBatchSize = 100_000
+	// 20k rows per batch (5x smaller than migration script's 100k).
+	// Smaller batches = more frequent checkpoint saves = less work lost on VPN drop.
+	defaultBatchSize = 20_000
 	defaultWorkers   = 8
 )
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-// func msToTime(ms int64) time.Time {
-// 	if ms == 0 {
-// 		return time.Unix(0, 0).UTC()
-// 	}
-// 	return time.UnixMilli(ms).UTC()
-// }
-
-// msToIST converts a PG epoch-millis timestamp to a Go time in UTC.
-// PG stores genuine UTC epochs (e.g. 07:53 UTC). ClickHouse displays
-// DateTime64 in its server timezone (UTC), so storing the epoch as-is
-// preserves the same wall-clock digits (07:53) in query output.
 func msToIST(ms *int64) time.Time {
-    if ms == nil {
-        return time.Time{}
-    }
-    return time.UnixMilli(*ms).UTC()
+	if ms == nil {
+		return time.Time{}
+	}
+	return time.UnixMilli(*ms).UTC()
 }
 
 func msToISTVal(ms int64) time.Time {
-    return time.UnixMilli(ms).UTC()
+	return time.UnixMilli(ms).UTC()
 }
 
 func nullableString(s *string) string {
-    if s == nil {
-        return ""
-    }
-    return *s
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 func computeFinancialYear(epochMs int64) string {
@@ -80,88 +73,305 @@ func d(f float64) decimal.Decimal {
 	return decimal.NewFromFloat(f)
 }
 
-// quoteLiteral safely quotes a string for SQL embedding.
 func quoteLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// getCompletedTenants compares per-tenant row counts between PG and CH.
-// Returns a set of tenant IDs where CH count >= PG count (i.e., fully migrated).
-func getCompletedTenants(
-	ctx context.Context,
-	pgPool *pgxpool.Pool,
-	chConn clickhouse.Conn,
-	tableName string,
-	pgCountQuery string,
-	chCountQuery string,
-) (map[string]bool, error) {
-	// Get PG counts
-	pgCounts := make(map[string]int64)
-	pgRows, err := pgPool.Query(ctx, pgCountQuery)
+// ─── Checkpoint store (local JSON file) ─────────────────────────────────────
+//
+// After every successful batch send, the last keyset key is saved to a local
+// JSON file.  If the VPN drops mid-sync, the next run reads this file and
+// resumes each table+tenant from the exact row where it stopped.
+
+// TenantProgress tracks per-tenant resume state.
+type TenantProgress struct {
+	LastKey    string `json:"last_key"`
+	RowsSynced int64  `json:"rows_synced"`
+	Completed  bool   `json:"completed"`
+}
+
+// TableCheckpoint stores per-table in-flight state.
+type TableCheckpoint struct {
+	Watermark    int64                      `json:"watermark"`
+	NewWatermark int64                      `json:"new_watermark"`
+	Phase        string                     `json:"phase,omitempty"` // for multi-phase tables (demand)
+	Tenants      map[string]*TenantProgress `json:"tenants"`
+	Completed    bool                       `json:"completed,omitempty"`
+}
+
+// CheckpointData is the root structure persisted to disk.
+type CheckpointData struct {
+	Tables map[string]*TableCheckpoint `json:"tables"`
+}
+
+// CheckpointStore manages atomic reads/writes of the checkpoint file.
+// Disk writes are throttled to at most once per saveInterval (default 5s)
+// to avoid I/O pressure from 64+ concurrent workers.  In-memory state is
+// always current; on crash you lose at most ~5 seconds of progress.
+type CheckpointStore struct {
+	mu           sync.Mutex
+	filePath     string
+	data         CheckpointData
+	dirty        bool
+	lastSaveTime time.Time
+	saveInterval time.Duration
+}
+
+const defaultSaveInterval = 5 * time.Second
+
+func NewCheckpointStore(filePath string) *CheckpointStore {
+	return &CheckpointStore{
+		filePath:     filePath,
+		data:         CheckpointData{Tables: make(map[string]*TableCheckpoint)},
+		saveInterval: defaultSaveInterval,
+	}
+}
+
+// Load reads an existing checkpoint file. Returns nil if file does not exist.
+func (cs *CheckpointStore) Load() error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	raw, err := os.ReadFile(cs.filePath)
 	if err != nil {
-		return nil, fmt.Errorf("pg count query: %w", err)
-	}
-	defer pgRows.Close()
-	for pgRows.Next() {
-		var tenant string
-		var count int64
-		if err := pgRows.Scan(&tenant, &count); err != nil {
-			return nil, fmt.Errorf("pg count scan: %w", err)
+		if os.IsNotExist(err) {
+			return nil // first run
 		}
-		pgCounts[tenant] = count
+		return fmt.Errorf("read checkpoint: %w", err)
 	}
-	if err := pgRows.Err(); err != nil {
-		return nil, fmt.Errorf("pg count rows: %w", err)
+	if err := json.Unmarshal(raw, &cs.data); err != nil {
+		return fmt.Errorf("parse checkpoint: %w", err)
 	}
+	if cs.data.Tables == nil {
+		cs.data.Tables = make(map[string]*TableCheckpoint)
+	}
+	return nil
+}
 
-	// Get CH counts
-	chCounts := make(map[string]int64)
-	chRows, err := chConn.Query(ctx, chCountQuery)
+// save writes checkpoint atomically (write tmp → rename). Caller must hold mu.
+func (cs *CheckpointStore) save() error {
+	raw, err := json.MarshalIndent(cs.data, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("ch count query: %w", err)
+		return err
 	}
-	defer chRows.Close()
-	for chRows.Next() {
-		var tenant string
-		var count uint64
-		if err := chRows.Scan(&tenant, &count); err != nil {
-			return nil, fmt.Errorf("ch count scan: %w", err)
-		}
-		chCounts[tenant] = int64(count)
+	tmp := cs.filePath + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0644); err != nil {
+		return err
 	}
+	if err := os.Rename(tmp, cs.filePath); err != nil {
+		return err
+	}
+	cs.dirty = false
+	cs.lastSaveTime = time.Now()
+	return nil
+}
 
-	// Compare: tenant is complete if CH >= PG
-	completed := make(map[string]bool)
-	for tenant, pgCount := range pgCounts {
-		chCount := chCounts[tenant]
-		if chCount >= pgCount {
-			completed[tenant] = true
-		}
+// saveIfDue writes to disk only if saveInterval has elapsed since last write.
+// Caller must hold mu. Returns nil if throttled (no-op).
+func (cs *CheckpointStore) saveIfDue() error {
+	cs.dirty = true
+	if time.Since(cs.lastSaveTime) >= cs.saveInterval {
+		return cs.save()
 	}
+	return nil
+}
 
-	if len(completed) > 0 {
-		log.Printf("[%s] Resume: %d/%d tenants already complete, will skip them",
-			tableName, len(completed), len(pgCounts))
+// Flush forces an immediate write to disk if there are pending changes.
+// Safe to call from any goroutine.
+func (cs *CheckpointStore) Flush() error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.dirty {
+		return cs.save()
 	}
-	return completed, nil
+	return nil
+}
+
+// InitTable creates or resets a table checkpoint entry.
+func (cs *CheckpointStore) InitTable(table string, watermark, newWatermark int64) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	existing := cs.data.Tables[table]
+	if existing != nil && !existing.Completed {
+		// Already initialized from a previous interrupted run — keep it
+		return
+	}
+	cs.data.Tables[table] = &TableCheckpoint{
+		Watermark:    watermark,
+		NewWatermark: newWatermark,
+		Tenants:      make(map[string]*TenantProgress),
+	}
+	_ = cs.save()
+}
+
+// GetTableCheckpoint returns a snapshot of the table checkpoint (nil if not found).
+func (cs *CheckpointStore) GetTableCheckpoint(table string) *TableCheckpoint {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.data.Tables[table]
+}
+
+// GetTenantProgress returns a tenant's checkpoint (nil if not found).
+func (cs *CheckpointStore) GetTenantProgress(table, tenant string) *TenantProgress {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	tc := cs.data.Tables[table]
+	if tc == nil {
+		return nil
+	}
+	return tc.Tenants[tenant]
+}
+
+// UpdateTenant saves the current keyset position for a tenant.
+// Disk write is throttled — in-memory state is always up-to-date.
+func (cs *CheckpointStore) UpdateTenant(table, tenant, lastKey string, rowsSynced int64) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	tc := cs.data.Tables[table]
+	if tc == nil {
+		tc = &TableCheckpoint{Tenants: make(map[string]*TenantProgress)}
+		cs.data.Tables[table] = tc
+	}
+	tc.Tenants[tenant] = &TenantProgress{
+		LastKey:    lastKey,
+		RowsSynced: rowsSynced,
+	}
+	_ = cs.saveIfDue() // throttled: writes at most every 5s
+}
+
+// MarkTenantDone marks a tenant as fully synced. Always flushes to disk
+// (called once per tenant, not on the hot path).
+func (cs *CheckpointStore) MarkTenantDone(table, tenant string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	tc := cs.data.Tables[table]
+	if tc == nil {
+		return
+	}
+	if tp := tc.Tenants[tenant]; tp != nil {
+		tp.Completed = true
+	} else {
+		tc.Tenants[tenant] = &TenantProgress{Completed: true}
+	}
+	_ = cs.save() // always flush: one-time per tenant
+}
+
+// SetPhase sets the current phase for multi-phase tables (demand).
+func (cs *CheckpointStore) SetPhase(table, phase string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	tc := cs.data.Tables[table]
+	if tc == nil {
+		return
+	}
+	tc.Phase = phase
+	_ = cs.save()
+}
+
+// GetPhase returns the current phase for a table.
+func (cs *CheckpointStore) GetPhase(table string) string {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	tc := cs.data.Tables[table]
+	if tc == nil {
+		return ""
+	}
+	return tc.Phase
+}
+
+// MarkTableDone marks a table as fully synced and removes its tenant entries.
+func (cs *CheckpointStore) MarkTableDone(table string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	if tc := cs.data.Tables[table]; tc != nil {
+		tc.Completed = true
+		tc.Tenants = nil
+		tc.Phase = ""
+	}
+	_ = cs.save()
+}
+
+// Remove deletes the checkpoint file (called after a fully successful run).
+func (cs *CheckpointStore) Remove() error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	err := os.Remove(cs.filePath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+// ─── Watermark management (ClickHouse) ──────────────────────────────────────
+
+func ensureWatermarkTable(ctx context.Context, chConn clickhouse.Conn) error {
+	return chConn.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS _incremental_sync_watermark (
+			table_name         String,
+			last_sync_epoch_ms Int64,
+			synced_at          DateTime DEFAULT now()
+		) ENGINE = ReplacingMergeTree(synced_at)
+		ORDER BY table_name
+	`)
+}
+
+func getWatermark(ctx context.Context, chConn clickhouse.Conn, tableName string) (int64, error) {
+	var wm int64
+	err := chConn.QueryRow(ctx,
+		`SELECT last_sync_epoch_ms FROM _incremental_sync_watermark FINAL WHERE table_name = $1`,
+		tableName,
+	).Scan(&wm)
+	if err != nil {
+		if strings.Contains(err.Error(), "no rows") {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return wm, nil
+}
+
+func updateWatermark(ctx context.Context, chConn clickhouse.Conn, tableName string, epochMs int64) error {
+	return chConn.Exec(ctx,
+		`INSERT INTO _incremental_sync_watermark (table_name, last_sync_epoch_ms) VALUES ($1, $2)`,
+		tableName, epochMs,
+	)
+}
+
+func getMaxModifiedTime(ctx context.Context, pgPool *pgxpool.Pool, query string) (int64, error) {
+	var maxMs int64
+	err := pgPool.QueryRow(ctx, query).Scan(&maxMs)
+	if err != nil {
+		return 0, fmt.Errorf("max modified time: %w", err)
+	}
+	return maxMs, nil
+}
+
+func watermarkFilter(column string, ms int64) string {
+	if ms <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" AND %s > %d", column, ms)
 }
 
 // ─── Core migration engine ─────────────────────────────────────────────────
 
-// tenantWithCount holds a tenant ID and its row count for sorting.
 type tenantWithCount struct {
 	id    string
 	count int64
 }
 
-// getDistinctTenants returns the list of distinct tenant IDs from a table.
 func getDistinctTenants(ctx context.Context, pgPool *pgxpool.Pool, query string) ([]string, error) {
 	rows, err := pgPool.Query(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("query tenants: %w", err)
 	}
 	defer rows.Close()
-
 	var tenants []string
 	for rows.Next() {
 		var t string
@@ -173,13 +383,8 @@ func getDistinctTenants(ctx context.Context, pgPool *pgxpool.Pool, query string)
 	return tenants, rows.Err()
 }
 
-// getTenantsWithCounts returns tenants sorted by row count descending (largest first).
-// It derives a COUNT query from the tenant discovery query.
 func getTenantsWithCounts(ctx context.Context, pgPool *pgxpool.Pool, tenantQuery string) ([]tenantWithCount, error) {
-	// Transform "SELECT DISTINCT tenantid FROM ... ORDER BY tenantid"
-	// into    "SELECT tenantid, COUNT(*) FROM ... GROUP BY tenantid ORDER BY COUNT(*) DESC"
 	countQuery := strings.Replace(tenantQuery, "SELECT DISTINCT tenantid", "SELECT tenantid, COUNT(*)", 1)
-	// Remove existing ORDER BY and add GROUP BY + ORDER BY count DESC
 	if idx := strings.LastIndex(strings.ToUpper(countQuery), "ORDER BY"); idx != -1 {
 		countQuery = countQuery[:idx]
 	}
@@ -187,7 +392,6 @@ func getTenantsWithCounts(ctx context.Context, pgPool *pgxpool.Pool, tenantQuery
 
 	rows, err := pgPool.Query(ctx, countQuery)
 	if err != nil {
-		// Fallback: if count query fails, return unsorted
 		log.Printf("WARN: count query failed (%v), falling back to unsorted tenants", err)
 		tenants, err2 := getDistinctTenants(ctx, pgPool, tenantQuery)
 		if err2 != nil {
@@ -213,14 +417,12 @@ func getTenantsWithCounts(ctx context.Context, pgPool *pgxpool.Pool, tenantQuery
 	return result, rows.Err()
 }
 
-// pageResult holds the result of scanning one page from PG.
 type pageResult struct {
 	lastKey string
 	count   int
 	err     error
 }
 
-// fetchPage queries PG for one page and scans rows directly into the CH batch.
 func fetchPage(
 	ctx context.Context,
 	pgPool *pgxpool.Pool,
@@ -268,12 +470,14 @@ func fetchPage(
 	if err := rows.Err(); err != nil {
 		return nil, pageResult{err: fmt.Errorf("rows err: %w", err)}
 	}
-
 	return b, pageResult{lastKey: keysetVal, count: count}
 }
 
-// migrateForTenant runs a keyset-paginated migration for a single tenant's data.
-// Uses a pipeline: while CH is sending batch N, PG is already fetching batch N+1.
+// migrateForTenant runs keyset-paginated sync for a single tenant.
+//
+// startKey: if non-empty, resume from this keyset position (skip rows <= startKey).
+// onBatchDone: called after each batch is successfully sent to CH, with the
+// last keyset value and cumulative rows so far.  Used for checkpointing.
 func migrateForTenant(
 	ctx context.Context,
 	pgPool *pgxpool.Pool,
@@ -287,6 +491,8 @@ func migrateForTenant(
 	keysetColumn string,
 	processRow func(scan func(dest ...any) error, appendFn func(v ...any) error) error,
 	globalCounter *int64,
+	startKey string,
+	onBatchDone func(lastKey string, rowsSoFar int64),
 ) (int64, error) {
 	pgQuery := strings.ReplaceAll(pgQueryTemplate, "$1", quoteLiteral(tenantID))
 	pgQueryWithKeyset := strings.Replace(pgQuery, "SELECT", "SELECT "+keysetColumn+",", 1)
@@ -295,7 +501,6 @@ func migrateForTenant(
 	var lastKey string
 	page := 0
 
-	// Pipeline: prefetch next page from PG while sending current batch to CH
 	type prefetchResult struct {
 		batch interface {
 			Send() error
@@ -305,8 +510,10 @@ func migrateForTenant(
 		page   int
 	}
 
-	buildQuery := func(p int, lk string) string {
-		if p == 1 {
+	// buildQuery constructs a keyset-paginated query.
+	// If lk is empty, fetches from the beginning; otherwise fetches rows > lk.
+	buildQuery := func(lk string) string {
+		if lk == "" {
 			return fmt.Sprintf("%s ORDER BY %s LIMIT %d",
 				pgQueryWithKeyset, keysetColumn, batchSize)
 		}
@@ -315,19 +522,20 @@ func migrateForTenant(
 	}
 
 	logPage := func(p int, lk string) {
-		if p == 1 {
-			log.Printf("[%s] tenant %s (%d/%d) — page %d: ORDER BY %s LIMIT %d",
-				tableName, tenantID, tenantIdx, totalTenants, p, keysetColumn, batchSize)
+		if lk == "" {
+			log.Printf("[%s] tenant %s (%d/%d) — page %d: from start",
+				tableName, tenantID, tenantIdx, totalTenants, p)
 		} else {
-			log.Printf("[%s] tenant %s (%d/%d) — page %d: %s > '%s' LIMIT %d",
-				tableName, tenantID, tenantIdx, totalTenants, p, keysetColumn, lk, batchSize)
+			log.Printf("[%s] tenant %s (%d/%d) — page %d: %s > '%s'",
+				tableName, tenantID, tenantIdx, totalTenants, p, keysetColumn, lk)
 		}
 	}
 
-	// Fetch first page synchronously
+	// If resuming, start from the checkpoint key
+	lastKey = startKey
 	page = 1
-	logPage(page, "")
-	curBatch, curResult := fetchPage(ctx, pgPool, chInsert, chConn, buildQuery(page, ""), processRow)
+	logPage(page, lastKey)
+	curBatch, curResult := fetchPage(ctx, pgPool, chInsert, chConn, buildQuery(lastKey), processRow)
 	if curResult.err != nil {
 		return 0, curResult.err
 	}
@@ -340,19 +548,16 @@ func migrateForTenant(
 	lastKey = curResult.lastKey
 
 	for {
-		// Start prefetching next page in background
 		nextPage := page + 1
 		nextKey := lastKey
 		prefetchCh := make(chan prefetchResult, 1)
 		go func(p int, lk string) {
 			logPage(p, lk)
-			b, r := fetchPage(ctx, pgPool, chInsert, chConn, buildQuery(p, lk), processRow)
+			b, r := fetchPage(ctx, pgPool, chInsert, chConn, buildQuery(lk), processRow)
 			prefetchCh <- prefetchResult{batch: b, result: r, page: p}
 		}(nextPage, nextKey)
 
-		// Send current batch to CH (overlaps with PG prefetch)
 		if err := curBatch.Send(); err != nil {
-			// Drain and abort prefetch
 			pf := <-prefetchCh
 			if pf.batch != nil {
 				_ = pf.batch.Abort()
@@ -365,7 +570,11 @@ func migrateForTenant(
 		log.Printf("[%s] tenant %s (%d/%d) — page %d: sent %d rows (tenant total: %d)",
 			tableName, tenantID, tenantIdx, totalTenants, page, curResult.count, tenantTotal)
 
-		// Wait for prefetch to complete
+		// Checkpoint: save progress after each successful batch
+		if onBatchDone != nil {
+			onBatchDone(lastKey, tenantTotal)
+		}
+
 		pf := <-prefetchCh
 		if pf.result.err != nil {
 			return tenantTotal, pf.result.err
@@ -377,19 +586,16 @@ func migrateForTenant(
 			break
 		}
 
-		// Advance to the prefetched page
 		page = pf.page
 		curBatch = pf.batch
 		curResult = pf.result
 		lastKey = curResult.lastKey
 	}
-
 	return tenantTotal, nil
 }
 
 // parallelByTenant discovers tenants and distributes them across a worker pool.
-// Tenants are sorted largest-first to minimize tail latency.
-// Each worker processes one tenant at a time using keyset pagination.
+// Uses cpStore to skip completed tenants and resume in-progress ones.
 func parallelByTenant(
 	ctx context.Context,
 	pgPool *pgxpool.Pool,
@@ -403,8 +609,8 @@ func parallelByTenant(
 	keysetColumn string,
 	processRow func(scan func(dest ...any) error, appendFn func(v ...any) error) error,
 	globalCounter *int64,
-	skipTenants map[string]bool,
 	tenantFilter string,
+	cpStore *CheckpointStore,
 ) (int64, error) {
 	var tenantsWithCounts []tenantWithCount
 	if tenantFilter != "" {
@@ -420,52 +626,28 @@ func parallelByTenant(
 	log.Printf("[%s] Starting — %d tenants, %d workers", tableName, len(tenantsWithCounts), workers)
 
 	if len(tenantsWithCounts) == 0 {
-		log.Printf("[%s] No tenants found, skipping", tableName)
+		log.Printf("[%s] No tenants with new data, skipping", tableName)
 		return 0, nil
 	}
 
-	// Filter out already-completed tenants
-	var pending []tenantWithCount
-	for _, t := range tenantsWithCounts {
-		if skipTenants[t.id] {
-			log.Printf("[%s] SKIP tenant %s (already complete)", tableName, t.id)
-			continue
-		}
-		pending = append(pending, t)
-	}
-	if len(pending) == 0 {
-		log.Printf("[%s] All %d tenants already complete, nothing to do", tableName, len(tenantsWithCounts))
-		return 0, nil
-	}
-	if len(skipTenants) > 0 {
-		log.Printf("[%s] %d tenants to migrate (%d skipped)", tableName, len(pending), len(tenantsWithCounts)-len(pending))
-	}
-
-	// Sort pending tenants largest-first to minimize tail latency
-	sort.Slice(pending, func(i, j int) bool {
-		return pending[i].count > pending[j].count
+	sort.Slice(tenantsWithCounts, func(i, j int) bool {
+		return tenantsWithCounts[i].count > tenantsWithCounts[j].count
 	})
-	if len(pending) > 0 && pending[0].count > 0 {
-		log.Printf("[%s] Largest tenant: %s (%d rows), smallest: %s (%d rows)",
-			tableName, pending[0].id, pending[0].count,
-			pending[len(pending)-1].id, pending[len(pending)-1].count)
-	}
 
-	// Distribute tenants across workers
 	type tenantWork struct {
 		id  string
 		idx int
 	}
-	tenantCh := make(chan tenantWork, len(pending))
-	for i, t := range pending {
+	tenantCh := make(chan tenantWork, len(tenantsWithCounts))
+	for i, t := range tenantsWithCounts {
 		tenantCh <- tenantWork{id: t.id, idx: i + 1}
 	}
 	close(tenantCh)
-	totalTenants := len(pending)
+	totalTenants := len(tenantsWithCounts)
 
 	activeWorkers := workers
-	if activeWorkers > len(pending) {
-		activeWorkers = len(pending)
+	if activeWorkers > totalTenants {
+		activeWorkers = totalTenants
 	}
 
 	var tableTotal int64
@@ -479,11 +661,36 @@ func parallelByTenant(
 		go func() {
 			defer wg.Done()
 			for tw := range tenantCh {
+				// ── Check checkpoint: skip completed, resume in-progress ──
+				startKey := ""
+				var previousRows int64
+				if cpStore != nil {
+					tp := cpStore.GetTenantProgress(tableName, tw.id)
+					if tp != nil && tp.Completed {
+						atomic.AddInt64(&completedTenants, 1)
+						log.Printf("[%s] SKIP tenant %s (completed in checkpoint)",
+							tableName, tw.id)
+						continue
+					}
+					if tp != nil && tp.LastKey != "" {
+						startKey = tp.LastKey
+						previousRows = tp.RowsSynced
+						log.Printf("[%s] RESUME tenant %s from key '%s' (%d rows already synced)",
+							tableName, tw.id, startKey, previousRows)
+					}
+				}
+
 				count, err := migrateForTenant(
 					ctx, pgPool, chConn, tableName, tw.id,
 					tw.idx, totalTenants,
 					pgQueryTemplate, chInsert, batchSize,
 					keysetColumn, processRow, globalCounter,
+					startKey,
+					func(lastKey string, rowsSoFar int64) {
+						if cpStore != nil {
+							cpStore.UpdateTenant(tableName, tw.id, lastKey, previousRows+rowsSoFar)
+						}
+					},
 				)
 				atomic.AddInt64(&tableTotal, count)
 				done := atomic.AddInt64(&completedTenants, 1)
@@ -492,9 +699,14 @@ func parallelByTenant(
 					mu.Lock()
 					migrationErrors = append(migrationErrors, fmt.Sprintf("%s: %v", tw.id, err))
 					mu.Unlock()
-					log.Printf("[%s] FAILED tenant %s (%d/%d) after %d rows: %v", tableName, tw.id, done, totalTenants, count, err)
+					log.Printf("[%s] FAILED tenant %s (%d/%d) after %d rows: %v",
+						tableName, tw.id, done, totalTenants, count, err)
 				} else {
-					log.Printf("[%s] tenant %s (%d/%d) done — %d rows", tableName, tw.id, done, totalTenants, count)
+					if cpStore != nil {
+						cpStore.MarkTenantDone(tableName, tw.id)
+					}
+					log.Printf("[%s] tenant %s (%d/%d) done — %d rows",
+						tableName, tw.id, done, totalTenants, count)
 				}
 			}
 		}()
@@ -503,21 +715,57 @@ func parallelByTenant(
 	wg.Wait()
 
 	total := atomic.LoadInt64(&tableTotal)
-	log.Printf("[%s] Completed — %d total rows", tableName, total)
+	log.Printf("[%s] Completed — %d total rows synced", tableName, total)
 
 	if len(migrationErrors) > 0 {
-		return total, fmt.Errorf("%d tenant(s) failed: %s", len(migrationErrors), strings.Join(migrationErrors, "; "))
+		return total, fmt.Errorf("%d tenant(s) failed: %s",
+			len(migrationErrors), strings.Join(migrationErrors, "; "))
 	}
 	return total, nil
 }
 
-// ─── Table 1: property_address_fact ─────────────────────────────────────────
+// ─── Incremental sync: property_address_entity ──────────────────────────────
 
-func migratePropertyAddress(ctx context.Context, pgPool *pgxpool.Pool, chConn clickhouse.Conn, batchSize, workers int, globalCounter *int64, resume bool, tenant string) (int64, error) {
-	const tenantQuery = `SELECT DISTINCT tenantid FROM eg_pt_property ORDER BY tenantid`
+func syncPropertyAddress(
+	ctx context.Context, pgPool *pgxpool.Pool, chConn clickhouse.Conn,
+	batchSize, workers int, globalCounter *int64, tenant string,
+	cpStore *CheckpointStore,
+) (int64, error) {
+	const table = "property_address_entity"
 
-	// $1 is replaced with quoted tenant_id at runtime
-	const pgQuery = `
+	// Check for an existing checkpoint (interrupted previous run)
+	cp := cpStore.GetTableCheckpoint(table)
+	var watermark, newWatermark int64
+
+	if cp != nil && !cp.Completed {
+		watermark = cp.Watermark
+		newWatermark = cp.NewWatermark
+		log.Printf("[%s] Resuming interrupted sync (watermark: %d → %d)", table, watermark, newWatermark)
+	} else {
+		var err error
+		watermark, err = getWatermark(ctx, chConn, table)
+		if err != nil {
+			return 0, fmt.Errorf("get watermark: %w", err)
+		}
+		newWatermark, err = getMaxModifiedTime(ctx, pgPool,
+			`SELECT COALESCE(MAX(lastmodifiedtime), 0) FROM eg_pt_property`)
+		if err != nil {
+			return 0, err
+		}
+		if newWatermark <= watermark {
+			log.Printf("[%s] No new data (watermark: %d, max in PG: %d)", table, watermark, newWatermark)
+			return 0, nil
+		}
+		cpStore.InitTable(table, watermark, newWatermark)
+	}
+	log.Printf("[%s] Syncing delta: lastmodifiedtime > %d (up to %d)", table, watermark, newWatermark)
+
+	wf := watermarkFilter("p.lastmodifiedtime", watermark)
+
+	tenantQuery := fmt.Sprintf(
+		`SELECT DISTINCT tenantid FROM eg_pt_property WHERE 1=1%s ORDER BY tenantid`, wf)
+
+	pgQuery := fmt.Sprintf(`
 		SELECT
 			COALESCE(p.id, ''), COALESCE(p.tenantid, ''), COALESCE(p.propertyid, ''),
 			COALESCE(p.surveyid, ''), COALESCE(p.accountid, ''),
@@ -539,7 +787,7 @@ func migratePropertyAddress(ctx context.Context, pgPool *pgxpool.Pool, chConn cl
 			COALESCE(a.latitude, 0)::float8, COALESCE(a.longitude, 0)::float8
 		FROM eg_pt_property p
 		LEFT JOIN eg_pt_address a ON p.id = a.propertyid
-		WHERE p.tenantid = $1`
+		WHERE p.tenantid = $1%s`, wf)
 
 	const chInsert = `INSERT INTO property_address_entity (
 		id, tenant_id, property_id, survey_id, account_id,
@@ -552,21 +800,8 @@ func migratePropertyAddress(ctx context.Context, pgPool *pgxpool.Pool, chConn cl
 		locality, city, district, region, state, country,
 		pin_code, latitude, longitude)`
 
-	var skipTenants map[string]bool
-	if resume {
-		var err error
-		skipTenants, err = getCompletedTenants(ctx, pgPool, chConn,
-			"property_address_entity",
-			`SELECT tenantid, count(*) FROM eg_pt_property GROUP BY tenantid`,
-			`SELECT tenant_id, count() FROM property_address_entity FINAL GROUP BY tenant_id`,
-		)
-		if err != nil {
-			return 0, fmt.Errorf("resume check: %w", err)
-		}
-	}
-
-	return parallelByTenant(ctx, pgPool, chConn,
-		"property_address_entity", tenantQuery, pgQuery, chInsert,
+	count, err := parallelByTenant(ctx, pgPool, chConn,
+		table, tenantQuery, pgQuery, chInsert,
 		batchSize, workers, "p.id",
 		func(scan func(dest ...any) error, appendFn func(v ...any) error) error {
 			var (
@@ -612,412 +847,63 @@ func migratePropertyAddress(ctx context.Context, pgPool *pgxpool.Pool, chConn cl
 				pinCode, d(lat), d(lon),
 			)
 		},
-		globalCounter,
-		skipTenants,
-		tenant,
+		globalCounter, tenant, cpStore,
 	)
+	if err != nil {
+		return count, err
+	}
+
+	if count > 0 {
+		if err := updateWatermark(ctx, chConn, table, newWatermark); err != nil {
+			return count, fmt.Errorf("update watermark: %w", err)
+		}
+		log.Printf("[%s] Watermark advanced to %d", table, newWatermark)
+	}
+	cpStore.MarkTableDone(table)
+	return count, nil
 }
 
-func migrateAssessment(
-    ctx context.Context,
-    pgPool *pgxpool.Pool,
-    chConn clickhouse.Conn,
-    batchSize, workers int,
-    globalCounter *int64,
-    resume bool,
-    tenant string,
+// ─── Incremental sync: property_unit_entity ─────────────────────────────────
+
+func syncPropertyUnit(
+	ctx context.Context, pgPool *pgxpool.Pool, chConn clickhouse.Conn,
+	batchSize, workers int, globalCounter *int64, tenant string,
+	cpStore *CheckpointStore,
 ) (int64, error) {
+	const table = "property_unit_entity"
 
-    const tenantQuery = `
-        SELECT DISTINCT tenantid
-        FROM eg_pt_asmt_assessment
-        ORDER BY tenantid`
+	cp := cpStore.GetTableCheckpoint(table)
+	var watermark, newWatermark int64
 
-    const pgQuery = `
-        SELECT
-            COALESCE(id,''),
-            COALESCE(tenantid,''),
-            COALESCE(assessmentnumber,''),
-            COALESCE(propertyid,''),
-            COALESCE(financialyear,''),
-            COALESCE(status,''),
-            COALESCE(source,''),
-            COALESCE(channel,''),
-            COALESCE(createdby,''),
-            COALESCE(createdtime,0),
-            COALESCE(lastmodifiedby,''),
-            COALESCE(lastmodifiedtime,0)
-        FROM eg_pt_asmt_assessment
-        WHERE tenantid = $1`
+	if cp != nil && !cp.Completed {
+		watermark = cp.Watermark
+		newWatermark = cp.NewWatermark
+		log.Printf("[%s] Resuming interrupted sync (watermark: %d → %d)", table, watermark, newWatermark)
+	} else {
+		var err error
+		watermark, err = getWatermark(ctx, chConn, table)
+		if err != nil {
+			return 0, fmt.Errorf("get watermark: %w", err)
+		}
+		newWatermark, err = getMaxModifiedTime(ctx, pgPool,
+			`SELECT COALESCE(MAX(lastmodifiedtime), 0) FROM eg_pt_unit`)
+		if err != nil {
+			return 0, err
+		}
+		if newWatermark <= watermark {
+			log.Printf("[%s] No new data (watermark: %d, max in PG: %d)", table, watermark, newWatermark)
+			return 0, nil
+		}
+		cpStore.InitTable(table, watermark, newWatermark)
+	}
+	log.Printf("[%s] Syncing delta: lastmodifiedtime > %d (up to %d)", table, watermark, newWatermark)
 
-    const chInsert = `
-        INSERT INTO property_assessment_entity (
-            assessmentnumber, tenant_id, propertyid,
-            financialyear, status, source, channel,
-            created_by, created_time,
-            last_modified_by, last_modified_time
-        )`
+	wf := watermarkFilter("u.lastmodifiedtime", watermark)
 
-    var skipTenants map[string]bool
-    if resume {
-        var err error
+	tenantQuery := fmt.Sprintf(
+		`SELECT DISTINCT tenantid FROM eg_pt_unit WHERE 1=1%s ORDER BY tenantid`, wf)
 
-
-		
-        skipTenants, err = getCompletedTenants(
-            ctx, pgPool, chConn,
-            "property_assessment_entity",
-            `SELECT tenantid, count(*) FROM eg_pt_asmt_assessment GROUP BY tenantid`,
-            `SELECT tenant_id, count() FROM property_assessment_entity FINAL GROUP BY tenant_id`,
-        )
-        if err != nil {
-            return 0, fmt.Errorf("resume check: %w", err)
-        }
-    }
-
-    return parallelByTenant(
-        ctx, pgPool, chConn,
-        "property_assessment_entity",
-        tenantQuery,
-        pgQuery,
-        chInsert,
-        batchSize,
-        workers,
-        "id",
-        func(scan func(dest ...any) error, appendFn func(v ...any) error) error {
-            var (
-                id, tenantID, assessmentNumber string
-                propertyID                     string
-                financialYear, status          string
-                source, channel                string
-                createdBy, lastModifiedBy      string
-                createdTimeMs, lastModifiedTimeMs int64
-            )
-
-            if err := scan(
-                &id, &tenantID, &assessmentNumber,
-                &propertyID,
-                &financialYear, &status,
-                &source, &channel,
-                &createdBy, &createdTimeMs,
-                &lastModifiedBy, &lastModifiedTimeMs,
-            ); err != nil {
-                return err
-            }
-
-            return appendFn(
-                assessmentNumber, tenantID, propertyID,
-                financialYear, status, source, channel,
-                createdBy, msToISTVal(createdTimeMs),
-                lastModifiedBy, msToISTVal(lastModifiedTimeMs),
-            )
-        },
-        globalCounter,
-        skipTenants,
-        tenant,
-    )
-}
-
-func migratePaymentWithDetails(
-    ctx context.Context,
-    pgPool *pgxpool.Pool,
-    chConn clickhouse.Conn,
-    batchSize, workers int,
-    globalCounter *int64,
-    resume bool,
-    tenant string,
-) (int64, error) {
-
-    const tenantQuery = `
-        SELECT DISTINCT tenantid
-        FROM egcl_payment
-        ORDER BY tenantid`
-
-    const pgQuery = `
-        SELECT
-            p.id,
-            p.tenantid,
-            p.totaldue,
-            p.totalamountpaid,
-            COALESCE(p.transactionnumber, ''),
-            p.transactiondate,
-            COALESCE(p.paymentmode, ''),
-            p.instrumentdate,
-            COALESCE(p.instrumentnumber, ''),
-            COALESCE(p.instrumentstatus, ''),
-            COALESCE(p.ifsccode, ''),
-            COALESCE(p.additionaldetails::text, '{}'),
-            COALESCE(p.payerid, ''),
-            COALESCE(p.paymentstatus, ''),
-            COALESCE(p.createdby, ''),
-            p.createdtime,
-            COALESCE(p.lastmodifiedby, ''),
-            p.lastmodifiedtime,
-            p.filestoreid,
-
-            COALESCE(d.receiptnumber, ''),
-            d.receiptdate,
-            COALESCE(d.receipttype, ''),
-            COALESCE(d.businessservice, ''),
-            COALESCE(d.billid, ''),
-            d.manualreceiptnumber,
-            d.manualreceiptdate
-
-        FROM egcl_payment p
-        JOIN egcl_paymentdetail d
-          ON p.id = d.paymentid
-        WHERE p.tenantid = $1`
-
-    const chInsert = `
-        INSERT INTO payment_with_details_entity (
-            tenant_id,
-            payment_id,
-            total_due,
-            total_amount_paid,
-            transaction_number,
-            transaction_date,
-            payment_mode,
-            instrument_date,
-            instrument_number,
-            instrument_status,
-            ifsc_code,
-            additional_details,
-            payer_id,
-            payment_status,
-            created_by,
-            created_time,
-            last_modified_by,
-            last_modified_time,
-            filestore_id,
-            receiptnumber,
-            receiptdate,
-            receipttype,
-            businessservice,
-            billid,
-            manualreceiptnumber,
-            manualreceiptdate
-        )`
-
-    var skipTenants map[string]bool
-    if resume {
-        var err error
-        skipTenants, err = getCompletedTenants(
-            ctx, pgPool, chConn,
-            "payment_with_details_entity",
-            `SELECT tenantid, count(*) FROM egcl_payment GROUP BY tenantid`,
-            `SELECT tenant_id, count() FROM payment_with_details_entity FINAL GROUP BY tenant_id`,
-        )
-        if err != nil {
-            return 0, fmt.Errorf("resume check: %w", err)
-        }
-    }
-
-    return parallelByTenant(
-        ctx, pgPool, chConn,
-        "payment_with_details_entity",
-        tenantQuery,
-        pgQuery,
-        chInsert,
-        batchSize,
-        workers,
-        "d.id",
-        func(scan func(dest ...any) error, appendFn func(v ...any) error) error {
-
-            var (
-                paymentID, tenantID string
-                totalDue, totalPaid float64
-                txnNumber string
-                txnDateMs int64
-                paymentMode string
-                instrumentDateMs *int64
-                instrumentNumber, instrumentStatus string
-                ifscCode string
-                additionalDetails string
-                payerID, paymentStatus string
-                createdBy string
-                createdTimeMs int64
-                lastModifiedBy string
-                lastModifiedTimeMs int64
-                filestoreID *string
-
-                receiptNumber string
-                receiptDateMs int64
-                receiptType string
-                businessService string
-                billID string
-                manualReceiptNumber *string
-                manualReceiptDateMs *int64
-            )
-
-            if err := scan(
-                &paymentID, &tenantID,
-                &totalDue, &totalPaid,
-                &txnNumber, &txnDateMs,
-                &paymentMode,
-                &instrumentDateMs,
-                &instrumentNumber,
-                &instrumentStatus,
-                &ifscCode,
-                &additionalDetails,
-                &payerID,
-                &paymentStatus,
-                &createdBy,
-                &createdTimeMs,
-                &lastModifiedBy,
-                &lastModifiedTimeMs,
-                &filestoreID,
-
-                &receiptNumber,
-                &receiptDateMs,
-                &receiptType,
-                &businessService,
-                &billID,
-                &manualReceiptNumber,
-                &manualReceiptDateMs,
-            ); err != nil {
-                return err
-            }
-
-            return appendFn(
-                tenantID,
-                paymentID,
-                d(totalDue),
-                d(totalPaid),
-                txnNumber,
-                msToISTVal(txnDateMs),
-                paymentMode,
-                msToIST(instrumentDateMs),
-                instrumentNumber,
-                instrumentStatus,
-                ifscCode,
-                additionalDetails,
-                payerID,
-                paymentStatus,
-                createdBy,
-                msToISTVal(createdTimeMs),
-                lastModifiedBy,
-                msToISTVal(lastModifiedTimeMs),
-                nullableString(filestoreID),
-                receiptNumber,
-                msToISTVal(receiptDateMs),
-                receiptType,
-                businessService,
-                billID,
-                nullableString(manualReceiptNumber),
-                msToIST(manualReceiptDateMs),
-            )
-        },
-        globalCounter,
-        skipTenants,
-        tenant,
-    )
-}
-
-
-func migrateBill(
-    ctx context.Context,
-    pgPool *pgxpool.Pool,
-    chConn clickhouse.Conn,
-    batchSize, workers int,
-    globalCounter *int64,
-    resume bool,
-    tenant string,
-) (int64, error) {
-
-    const tenantQuery = `
-        SELECT DISTINCT tenantid
-        FROM egcl_bill
-        ORDER BY tenantid`
-
-    const pgQuery = `
-        SELECT
-            COALESCE(id,''),
-            COALESCE(tenantid,''),
-            COALESCE(consumercode,''),
-            COALESCE(businessservice,''),
-            COALESCE(totalamount,0)::float8,
-            COALESCE(status,''),
-            COALESCE(createdby,''),
-            COALESCE(createdtime,0),
-            COALESCE(lastmodifiedby,''),
-            COALESCE(lastmodifiedtime,0)
-        FROM egcl_bill
-        WHERE tenantid = $1`
-
-    const chInsert = `
-        INSERT INTO bill_entity (
-            bill_id, tenant_id, consumercode,
-            businessservice,
-            totalamount,
-            status,
-            created_by, created_time,
-            last_modified_by, last_modified_time
-        )`
-
-    var skipTenants map[string]bool
-    if resume {
-        var err error
-        skipTenants, err = getCompletedTenants(
-            ctx, pgPool, chConn,
-            "bill_entity",
-            `SELECT tenantid, count(*) FROM egcl_bill GROUP BY tenantid`,
-            `SELECT tenant_id, count() FROM bill_entity FINAL GROUP BY tenant_id`,
-        )
-        if err != nil {
-            return 0, err
-        }
-    }
-
-    return parallelByTenant(
-        ctx, pgPool, chConn,
-        "bill_entity",
-        tenantQuery,
-        pgQuery,
-        chInsert,
-        batchSize,
-        workers,
-        "id",
-        func(scan func(dest ...any) error, appendFn func(v ...any) error) error {
-            var (
-                id, tenantID, consumerCode, businessService string
-                totalAmount float64
-                status string
-                createdBy, lastModifiedBy string
-                createdTimeMs, lastModifiedTimeMs int64
-            )
-
-            if err := scan(
-                &id, &tenantID, &consumerCode,
-                &businessService, &totalAmount,
-                &status,
-                &createdBy, &createdTimeMs,
-                &lastModifiedBy, &lastModifiedTimeMs,
-            ); err != nil {
-                return err
-            }
-
-            return appendFn(
-                id, tenantID, consumerCode,
-                businessService,
-                d(totalAmount),
-                status,
-                createdBy, msToISTVal(createdTimeMs),
-                lastModifiedBy, msToISTVal(lastModifiedTimeMs),
-            )
-        },
-        globalCounter,
-        skipTenants,
-        tenant,
-    )
-}
-
-
-// ─── Table 2: property_unit_fact ────────────────────────────────────────────
-
-func migratePropertyUnit(ctx context.Context, pgPool *pgxpool.Pool, chConn clickhouse.Conn, batchSize, workers int, globalCounter *int64, resume bool, tenant string) (int64, error) {
-	const tenantQuery = `SELECT DISTINCT tenantid FROM eg_pt_unit ORDER BY tenantid`
-
-	const pgQuery = `
+	pgQuery := fmt.Sprintf(`
 		SELECT
 			COALESCE(u.tenantid, ''), COALESCE(u.propertyid, ''),
 			COALESCE(u.id, ''), COALESCE(u.floorno, 0),
@@ -1035,7 +921,7 @@ func migratePropertyUnit(ctx context.Context, pgPool *pgxpool.Pool, chConn click
 			COALESCE(p.nooffloors, 0)
 		FROM eg_pt_unit u
 		JOIN eg_pt_property p ON u.propertyid = p.id
-		WHERE u.tenantid = $1`
+		WHERE u.tenantid = $1%s`, wf)
 
 	const chInsert = `INSERT INTO property_unit_entity (
 		tenant_id, property_uuid, unit_id, floor_no, unit_type,
@@ -1046,21 +932,8 @@ func migratePropertyUnit(ctx context.Context, pgPool *pgxpool.Pool, chConn click
 		property_id, property_type, ownership_category,
 		property_status, no_of_floors)`
 
-	var skipTenants map[string]bool
-	if resume {
-		var err error
-		skipTenants, err = getCompletedTenants(ctx, pgPool, chConn,
-			"property_unit_entity",
-			`SELECT u.tenantid, count(*) FROM eg_pt_unit u JOIN eg_pt_property p ON u.propertyid = p.id GROUP BY u.tenantid`,
-			`SELECT tenant_id, count() FROM property_unit_entity FINAL GROUP BY tenant_id`,
-		)
-		if err != nil {
-			return 0, fmt.Errorf("resume check: %w", err)
-		}
-	}
-
-	return parallelByTenant(ctx, pgPool, chConn,
-		"property_unit_entity", tenantQuery, pgQuery, chInsert,
+	count, err := parallelByTenant(ctx, pgPool, chConn,
+		table, tenantQuery, pgQuery, chInsert,
 		batchSize, workers, "u.id",
 		func(scan func(dest ...any) error, appendFn func(v ...any) error) error {
 			var (
@@ -1106,18 +979,63 @@ func migratePropertyUnit(ctx context.Context, pgPool *pgxpool.Pool, chConn click
 				int8(noOfFloors),
 			)
 		},
-		globalCounter,
-		skipTenants,
-		tenant,
+		globalCounter, tenant, cpStore,
 	)
+	if err != nil {
+		return count, err
+	}
+
+	if count > 0 {
+		if err := updateWatermark(ctx, chConn, table, newWatermark); err != nil {
+			return count, fmt.Errorf("update watermark: %w", err)
+		}
+		log.Printf("[%s] Watermark advanced to %d", table, newWatermark)
+	}
+	cpStore.MarkTableDone(table)
+	return count, nil
 }
 
-// ─── Table 3: property_owner_fact ───────────────────────────────────────────
+// ─── Incremental sync: property_owner_entity ────────────────────────────────
 
-func migratePropertyOwner(ctx context.Context, pgPool *pgxpool.Pool, chConn clickhouse.Conn, batchSize, workers int, globalCounter *int64, resume bool, tenant string) (int64, error) {
-	const tenantQuery = `SELECT DISTINCT tenantid FROM eg_pt_owner ORDER BY tenantid`
+func syncPropertyOwner(
+	ctx context.Context, pgPool *pgxpool.Pool, chConn clickhouse.Conn,
+	batchSize, workers int, globalCounter *int64, tenant string,
+	cpStore *CheckpointStore,
+) (int64, error) {
+	const table = "property_owner_entity"
 
-	const pgQuery = `
+	cp := cpStore.GetTableCheckpoint(table)
+	var watermark, newWatermark int64
+
+	if cp != nil && !cp.Completed {
+		watermark = cp.Watermark
+		newWatermark = cp.NewWatermark
+		log.Printf("[%s] Resuming interrupted sync (watermark: %d → %d)", table, watermark, newWatermark)
+	} else {
+		var err error
+		watermark, err = getWatermark(ctx, chConn, table)
+		if err != nil {
+			return 0, fmt.Errorf("get watermark: %w", err)
+		}
+		newWatermark, err = getMaxModifiedTime(ctx, pgPool,
+			`SELECT COALESCE(MAX(lastmodifiedtime), 0) FROM eg_pt_owner`)
+		if err != nil {
+			return 0, err
+		}
+		if newWatermark <= watermark {
+			log.Printf("[%s] No new data (watermark: %d, max in PG: %d)", table, watermark, newWatermark)
+			return 0, nil
+		}
+		cpStore.InitTable(table, watermark, newWatermark)
+	}
+	log.Printf("[%s] Syncing delta: lastmodifiedtime > %d (up to %d)", table, watermark, newWatermark)
+
+	wf := watermarkFilter("o.lastmodifiedtime", watermark)
+
+	tenantQuery := fmt.Sprintf(
+		`SELECT DISTINCT tenantid FROM eg_pt_owner WHERE 1=1%s ORDER BY tenantid`, wf)
+
+	pgQuery := fmt.Sprintf(`
 		SELECT
 			COALESCE(o.tenantid, ''), COALESCE(o.propertyid, ''),
 			COALESCE(o.ownerinfouuid, ''), COALESCE(o.userid, ''),
@@ -1132,7 +1050,7 @@ func migratePropertyOwner(ctx context.Context, pgPool *pgxpool.Pool, chConn clic
 			COALESCE(p.nooffloors, 0)
 		FROM eg_pt_owner o
 		JOIN eg_pt_property p ON o.propertyid = p.id
-		WHERE o.tenantid = $1`
+		WHERE o.tenantid = $1%s`, wf)
 
 	const chInsert = `INSERT INTO property_owner_entity (
 		tenant_id, property_uuid, owner_info_uuid, user_id, status,
@@ -1142,21 +1060,8 @@ func migratePropertyOwner(ctx context.Context, pgPool *pgxpool.Pool, chConn clic
 		property_id, property_type, ownership_category,
 		property_status, no_of_floors)`
 
-	var skipTenants map[string]bool
-	if resume {
-		var err error
-		skipTenants, err = getCompletedTenants(ctx, pgPool, chConn,
-			"property_owner_entity",
-			`SELECT o.tenantid, count(DISTINCT o.ownerinfouuid) FROM eg_pt_owner o JOIN eg_pt_property p ON o.propertyid = p.id GROUP BY o.tenantid`,
-			`SELECT tenant_id, count() FROM property_owner_entity FINAL GROUP BY tenant_id`,
-		)
-		if err != nil {
-			return 0, fmt.Errorf("resume check: %w", err)
-		}
-	}
-
-	return parallelByTenant(ctx, pgPool, chConn,
-		"property_owner_entity", tenantQuery, pgQuery, chInsert,
+	count, err := parallelByTenant(ctx, pgPool, chConn,
+		table, tenantQuery, pgQuery, chInsert,
 		batchSize, workers, "o.ownerinfouuid",
 		func(scan func(dest ...any) error, appendFn func(v ...any) error) error {
 			var (
@@ -1193,31 +1098,733 @@ func migratePropertyOwner(ctx context.Context, pgPool *pgxpool.Pool, chConn clic
 				int8(noOfFloors),
 			)
 		},
-		globalCounter,
-		skipTenants,
-		tenant,
+		globalCounter, tenant, cpStore,
 	)
+	if err != nil {
+		return count, err
+	}
+
+	if count > 0 {
+		if err := updateWatermark(ctx, chConn, table, newWatermark); err != nil {
+			return count, fmt.Errorf("update watermark: %w", err)
+		}
+		log.Printf("[%s] Watermark advanced to %d", table, newWatermark)
+	}
+	cpStore.MarkTableDone(table)
+	return count, nil
 }
 
-// ─── Table 4: demand_with_details_fact (two-phase: PG stream → CH staging → CH pivot) ──
+// ─── Incremental sync: property_assessment_entity ───────────────────────────
+
+func syncAssessment(
+	ctx context.Context, pgPool *pgxpool.Pool, chConn clickhouse.Conn,
+	batchSize, workers int, globalCounter *int64, tenant string,
+	cpStore *CheckpointStore,
+) (int64, error) {
+	const table = "property_assessment_entity"
+
+	cp := cpStore.GetTableCheckpoint(table)
+	var watermark, newWatermark int64
+
+	if cp != nil && !cp.Completed {
+		watermark = cp.Watermark
+		newWatermark = cp.NewWatermark
+		log.Printf("[%s] Resuming interrupted sync (watermark: %d → %d)", table, watermark, newWatermark)
+	} else {
+		var err error
+		watermark, err = getWatermark(ctx, chConn, table)
+		if err != nil {
+			return 0, fmt.Errorf("get watermark: %w", err)
+		}
+		newWatermark, err = getMaxModifiedTime(ctx, pgPool,
+			`SELECT COALESCE(MAX(lastmodifiedtime), 0) FROM eg_pt_asmt_assessment`)
+		if err != nil {
+			return 0, err
+		}
+		if newWatermark <= watermark {
+			log.Printf("[%s] No new data (watermark: %d, max in PG: %d)", table, watermark, newWatermark)
+			return 0, nil
+		}
+		cpStore.InitTable(table, watermark, newWatermark)
+	}
+	log.Printf("[%s] Syncing delta: lastmodifiedtime > %d (up to %d)", table, watermark, newWatermark)
+
+	wf := watermarkFilter("lastmodifiedtime", watermark)
+
+	tenantQuery := fmt.Sprintf(
+		`SELECT DISTINCT tenantid FROM eg_pt_asmt_assessment WHERE 1=1%s ORDER BY tenantid`, wf)
+
+	pgQuery := fmt.Sprintf(`
+		SELECT
+			COALESCE(id,''),
+			COALESCE(tenantid,''),
+			COALESCE(assessmentnumber,''),
+			COALESCE(propertyid,''),
+			COALESCE(financialyear,''),
+			COALESCE(status,''),
+			COALESCE(source,''),
+			COALESCE(channel,''),
+			COALESCE(createdby,''),
+			COALESCE(createdtime,0),
+			COALESCE(lastmodifiedby,''),
+			COALESCE(lastmodifiedtime,0)
+		FROM eg_pt_asmt_assessment
+		WHERE tenantid = $1%s`, wf)
+
+	const chInsert = `INSERT INTO property_assessment_entity (
+		assessmentnumber, tenant_id, propertyid,
+		financialyear, status, source, channel,
+		created_by, created_time,
+		last_modified_by, last_modified_time)`
+
+	count, err := parallelByTenant(ctx, pgPool, chConn,
+		table, tenantQuery, pgQuery, chInsert,
+		batchSize, workers, "id",
+		func(scan func(dest ...any) error, appendFn func(v ...any) error) error {
+			var (
+				id, tenantID, assessmentNumber    string
+				propertyID                        string
+				financialYear, status             string
+				source, channel                   string
+				createdBy, lastModifiedBy         string
+				createdTimeMs, lastModifiedTimeMs int64
+			)
+			if err := scan(
+				&id, &tenantID, &assessmentNumber,
+				&propertyID,
+				&financialYear, &status,
+				&source, &channel,
+				&createdBy, &createdTimeMs,
+				&lastModifiedBy, &lastModifiedTimeMs,
+			); err != nil {
+				return err
+			}
+			return appendFn(
+				assessmentNumber, tenantID, propertyID,
+				financialYear, status, source, channel,
+				createdBy, msToISTVal(createdTimeMs),
+				lastModifiedBy, msToISTVal(lastModifiedTimeMs),
+			)
+		},
+		globalCounter, tenant, cpStore,
+	)
+	if err != nil {
+		return count, err
+	}
+
+	if count > 0 {
+		if err := updateWatermark(ctx, chConn, table, newWatermark); err != nil {
+			return count, fmt.Errorf("update watermark: %w", err)
+		}
+		log.Printf("[%s] Watermark advanced to %d", table, newWatermark)
+	}
+	cpStore.MarkTableDone(table)
+	return count, nil
+}
+
+// ─── Incremental sync: payment_with_details_entity ──────────────────────────
+
+func syncPaymentWithDetails(
+	ctx context.Context, pgPool *pgxpool.Pool, chConn clickhouse.Conn,
+	batchSize, workers int, globalCounter *int64, tenant string,
+	cpStore *CheckpointStore,
+) (int64, error) {
+	const table = "payment_with_details_entity"
+
+	cp := cpStore.GetTableCheckpoint(table)
+	var watermark, newWatermark int64
+
+	if cp != nil && !cp.Completed {
+		watermark = cp.Watermark
+		newWatermark = cp.NewWatermark
+		log.Printf("[%s] Resuming interrupted sync (watermark: %d → %d)", table, watermark, newWatermark)
+	} else {
+		var err error
+		watermark, err = getWatermark(ctx, chConn, table)
+		if err != nil {
+			return 0, fmt.Errorf("get watermark: %w", err)
+		}
+		newWatermark, err = getMaxModifiedTime(ctx, pgPool,
+			`SELECT COALESCE(MAX(lastmodifiedtime), 0) FROM egcl_payment`)
+		if err != nil {
+			return 0, err
+		}
+		if newWatermark <= watermark {
+			log.Printf("[%s] No new data (watermark: %d, max in PG: %d)", table, watermark, newWatermark)
+			return 0, nil
+		}
+		cpStore.InitTable(table, watermark, newWatermark)
+	}
+	log.Printf("[%s] Syncing delta: lastmodifiedtime > %d (up to %d)", table, watermark, newWatermark)
+
+	wf := watermarkFilter("p.lastmodifiedtime", watermark)
+
+	tenantQuery := fmt.Sprintf(
+		`SELECT DISTINCT tenantid FROM egcl_payment WHERE 1=1%s ORDER BY tenantid`,
+		watermarkFilter("lastmodifiedtime", watermark))
+
+	pgQuery := fmt.Sprintf(`
+		SELECT
+			p.id,
+			p.tenantid,
+			p.totaldue,
+			p.totalamountpaid,
+			COALESCE(p.transactionnumber, ''),
+			p.transactiondate,
+			COALESCE(p.paymentmode, ''),
+			p.instrumentdate,
+			COALESCE(p.instrumentnumber, ''),
+			COALESCE(p.instrumentstatus, ''),
+			COALESCE(p.ifsccode, ''),
+			COALESCE(p.additionaldetails::text, '{}'),
+			COALESCE(p.payerid, ''),
+			COALESCE(p.paymentstatus, ''),
+			COALESCE(p.createdby, ''),
+			p.createdtime,
+			COALESCE(p.lastmodifiedby, ''),
+			p.lastmodifiedtime,
+			p.filestoreid,
+			COALESCE(d.receiptnumber, ''),
+			d.receiptdate,
+			COALESCE(d.receipttype, ''),
+			COALESCE(d.businessservice, ''),
+			COALESCE(d.billid, ''),
+			d.manualreceiptnumber,
+			d.manualreceiptdate
+		FROM egcl_payment p
+		JOIN egcl_paymentdetail d ON p.id = d.paymentid
+		WHERE p.tenantid = $1%s`, wf)
+
+	const chInsert = `INSERT INTO payment_with_details_entity (
+		tenant_id, payment_id, total_due, total_amount_paid,
+		transaction_number, transaction_date, payment_mode,
+		instrument_date, instrument_number, instrument_status,
+		ifsc_code, additional_details, payer_id, payment_status,
+		created_by, created_time, last_modified_by, last_modified_time,
+		filestore_id, receiptnumber, receiptdate, receipttype,
+		businessservice, billid, manualreceiptnumber, manualreceiptdate)`
+
+	count, err := parallelByTenant(ctx, pgPool, chConn,
+		table, tenantQuery, pgQuery, chInsert,
+		batchSize, workers, "d.id",
+		func(scan func(dest ...any) error, appendFn func(v ...any) error) error {
+			var (
+				paymentID, tenantID                      string
+				totalDue, totalPaid                      float64
+				txnNumber                                string
+				txnDateMs                                int64
+				paymentMode                              string
+				instrumentDateMs                         *int64
+				instrumentNumber, instrumentStatus       string
+				ifscCode                                 string
+				additionalDetails                        string
+				payerID, paymentStatus                   string
+				createdBy                                string
+				createdTimeMs                            int64
+				lastModifiedBy                           string
+				lastModifiedTimeMs                       int64
+				filestoreID                              *string
+				receiptNumber                            string
+				receiptDateMs                            int64
+				receiptType                              string
+				businessService                          string
+				billID                                   string
+				manualReceiptNumber                      *string
+				manualReceiptDateMs                      *int64
+			)
+			if err := scan(
+				&paymentID, &tenantID,
+				&totalDue, &totalPaid,
+				&txnNumber, &txnDateMs,
+				&paymentMode, &instrumentDateMs,
+				&instrumentNumber, &instrumentStatus,
+				&ifscCode, &additionalDetails,
+				&payerID, &paymentStatus,
+				&createdBy, &createdTimeMs,
+				&lastModifiedBy, &lastModifiedTimeMs,
+				&filestoreID,
+				&receiptNumber, &receiptDateMs,
+				&receiptType, &businessService,
+				&billID,
+				&manualReceiptNumber, &manualReceiptDateMs,
+			); err != nil {
+				return err
+			}
+			return appendFn(
+				tenantID, paymentID,
+				d(totalDue), d(totalPaid),
+				txnNumber, msToISTVal(txnDateMs),
+				paymentMode, msToIST(instrumentDateMs),
+				instrumentNumber, instrumentStatus,
+				ifscCode, additionalDetails,
+				payerID, paymentStatus,
+				createdBy, msToISTVal(createdTimeMs),
+				lastModifiedBy, msToISTVal(lastModifiedTimeMs),
+				nullableString(filestoreID),
+				receiptNumber, msToISTVal(receiptDateMs),
+				receiptType, businessService,
+				billID,
+				nullableString(manualReceiptNumber),
+				msToIST(manualReceiptDateMs),
+			)
+		},
+		globalCounter, tenant, cpStore,
+	)
+	if err != nil {
+		return count, err
+	}
+
+	if count > 0 {
+		if err := updateWatermark(ctx, chConn, table, newWatermark); err != nil {
+			return count, fmt.Errorf("update watermark: %w", err)
+		}
+		log.Printf("[%s] Watermark advanced to %d", table, newWatermark)
+	}
+	cpStore.MarkTableDone(table)
+	return count, nil
+}
+
+// ─── Incremental sync: bill_entity ──────────────────────────────────────────
+
+func syncBill(
+	ctx context.Context, pgPool *pgxpool.Pool, chConn clickhouse.Conn,
+	batchSize, workers int, globalCounter *int64, tenant string,
+	cpStore *CheckpointStore,
+) (int64, error) {
+	const table = "bill_entity"
+
+	cp := cpStore.GetTableCheckpoint(table)
+	var watermark, newWatermark int64
+
+	if cp != nil && !cp.Completed {
+		watermark = cp.Watermark
+		newWatermark = cp.NewWatermark
+		log.Printf("[%s] Resuming interrupted sync (watermark: %d → %d)", table, watermark, newWatermark)
+	} else {
+		var err error
+		watermark, err = getWatermark(ctx, chConn, table)
+		if err != nil {
+			return 0, fmt.Errorf("get watermark: %w", err)
+		}
+		newWatermark, err = getMaxModifiedTime(ctx, pgPool,
+			`SELECT COALESCE(MAX(lastmodifiedtime), 0) FROM egcl_bill`)
+		if err != nil {
+			return 0, err
+		}
+		if newWatermark <= watermark {
+			log.Printf("[%s] No new data (watermark: %d, max in PG: %d)", table, watermark, newWatermark)
+			return 0, nil
+		}
+		cpStore.InitTable(table, watermark, newWatermark)
+	}
+	log.Printf("[%s] Syncing delta: lastmodifiedtime > %d (up to %d)", table, watermark, newWatermark)
+
+	wf := watermarkFilter("lastmodifiedtime", watermark)
+
+	tenantQuery := fmt.Sprintf(
+		`SELECT DISTINCT tenantid FROM egcl_bill WHERE 1=1%s ORDER BY tenantid`, wf)
+
+	pgQuery := fmt.Sprintf(`
+		SELECT
+			COALESCE(id,''),
+			COALESCE(tenantid,''),
+			COALESCE(consumercode,''),
+			COALESCE(businessservice,''),
+			COALESCE(totalamount,0)::float8,
+			COALESCE(status,''),
+			COALESCE(createdby,''),
+			COALESCE(createdtime,0),
+			COALESCE(lastmodifiedby,''),
+			COALESCE(lastmodifiedtime,0)
+		FROM egcl_bill
+		WHERE tenantid = $1%s`, wf)
+
+	const chInsert = `INSERT INTO bill_entity (
+		bill_id, tenant_id, consumercode, businessservice,
+		totalamount, status,
+		created_by, created_time,
+		last_modified_by, last_modified_time)`
+
+	count, err := parallelByTenant(ctx, pgPool, chConn,
+		table, tenantQuery, pgQuery, chInsert,
+		batchSize, workers, "id",
+		func(scan func(dest ...any) error, appendFn func(v ...any) error) error {
+			var (
+				id, tenantID, consumerCode, businessService string
+				totalAmount                                 float64
+				status                                      string
+				createdBy, lastModifiedBy                   string
+				createdTimeMs, lastModifiedTimeMs           int64
+			)
+			if err := scan(
+				&id, &tenantID, &consumerCode,
+				&businessService, &totalAmount,
+				&status,
+				&createdBy, &createdTimeMs,
+				&lastModifiedBy, &lastModifiedTimeMs,
+			); err != nil {
+				return err
+			}
+			return appendFn(
+				id, tenantID, consumerCode,
+				businessService, d(totalAmount),
+				status,
+				createdBy, msToISTVal(createdTimeMs),
+				lastModifiedBy, msToISTVal(lastModifiedTimeMs),
+			)
+		},
+		globalCounter, tenant, cpStore,
+	)
+	if err != nil {
+		return count, err
+	}
+
+	if count > 0 {
+		if err := updateWatermark(ctx, chConn, table, newWatermark); err != nil {
+			return count, fmt.Errorf("update watermark: %w", err)
+		}
+		log.Printf("[%s] Watermark advanced to %d", table, newWatermark)
+	}
+	cpStore.MarkTableDone(table)
+	return count, nil
+}
+
+// ─── Incremental sync: property_audit_entity ─────────────────────────────
+
+func syncPropertyAudit(
+	ctx context.Context, pgPool *pgxpool.Pool, chConn clickhouse.Conn,
+	batchSize, workers int, globalCounter *int64, tenant string,
+	cpStore *CheckpointStore,
+) (int64, error) {
+	const table = "property_audit_entity"
+
+	cp := cpStore.GetTableCheckpoint(table)
+	var watermark, newWatermark int64
+
+	if cp != nil && !cp.Completed {
+		watermark = cp.Watermark
+		newWatermark = cp.NewWatermark
+		log.Printf("[%s] Resuming interrupted sync (watermark: %d → %d)", table, watermark, newWatermark)
+	} else {
+		var err error
+		watermark, err = getWatermark(ctx, chConn, table)
+		if err != nil {
+			return 0, fmt.Errorf("get watermark: %w", err)
+		}
+		newWatermark, err = getMaxModifiedTime(ctx, pgPool,
+			`SELECT COALESCE(MAX(auditcreatedtime), 0) FROM eg_pt_property_audit`)
+		if err != nil {
+			return 0, err
+		}
+		if newWatermark <= watermark {
+			log.Printf("[%s] No new data (watermark: %d, max in PG: %d)", table, watermark, newWatermark)
+			return 0, nil
+		}
+		cpStore.InitTable(table, watermark, newWatermark)
+	}
+	log.Printf("[%s] Syncing delta: auditcreatedtime > %d (up to %d)", table, watermark, newWatermark)
+
+	wf := watermarkFilter("auditcreatedtime", watermark)
+
+	tenantQuery := fmt.Sprintf(`
+		SELECT DISTINCT property->>'tenantId'
+		FROM eg_pt_property_audit
+		WHERE property->>'tenantId' IS NOT NULL%s
+		ORDER BY 1`, wf)
+
+	pgQuery := fmt.Sprintf(`
+		SELECT
+			COALESCE(property->>'tenantId', ''),
+			COALESCE(propertyid, ''),
+			COALESCE(property->>'propertyType', ''),
+			COALESCE(property->>'ownershipCategory', ''),
+			COALESCE(property->>'usageCategory', ''),
+			COALESCE(property->>'status', ''),
+			COALESCE(property->'workflow'->'state'->>'state', ''),
+			COALESCE((property->>'superBuiltUpArea')::float8, 0),
+			COALESCE((property->>'landArea')::float8, 0),
+			CASE WHEN property->'owners' IS NOT NULL AND jsonb_typeof(property->'owners') = 'array'
+				THEN jsonb_array_length(property->'owners')
+				ELSE 0
+			END,
+			auditcreatedtime,
+			COALESCE((property->'auditDetails'->>'createdTime')::bigint, 0),
+			COALESCE((property->'auditDetails'->>'lastModifiedTime')::bigint, 0)
+		FROM eg_pt_property_audit
+		WHERE property->>'tenantId' = $1%s`, wf)
+
+	const chInsert = `INSERT INTO property_audit_entity (
+		tenant_id, property_id, property_type,
+		ownership_category, usage_category, property_status, workflow_state,
+		super_built_up_area, land_area, owner_count,
+		audit_created_time, created_time, last_modified_time)`
+
+	count, err := parallelByTenant(ctx, pgPool, chConn,
+		table, tenantQuery, pgQuery, chInsert,
+		batchSize, workers, "audituuid",
+		func(scan func(dest ...any) error, appendFn func(v ...any) error) error {
+			var (
+				tenantID, propertyID       string
+				propertyType               string
+				ownershipCat, usageCat     string
+				propertyStatus             string
+				workflowState              string
+				superBuiltUpArea, landArea float64
+				ownerCount                 int32
+				auditCreatedTimeMs         int64
+				createdTimeMs              int64
+				lastModifiedTimeMs         int64
+			)
+			if err := scan(
+				&tenantID, &propertyID,
+				&propertyType,
+				&ownershipCat, &usageCat,
+				&propertyStatus,
+				&workflowState,
+				&superBuiltUpArea, &landArea,
+				&ownerCount,
+				&auditCreatedTimeMs,
+				&createdTimeMs, &lastModifiedTimeMs,
+			); err != nil {
+				return fmt.Errorf("scan: %w", err)
+			}
+			return appendFn(
+				tenantID, propertyID,
+				propertyType,
+				ownershipCat, usageCat,
+				propertyStatus,
+				workflowState,
+				d(superBuiltUpArea), d(landArea),
+				uint8(ownerCount),
+				msToISTVal(auditCreatedTimeMs),
+				msToISTVal(createdTimeMs),
+				msToISTVal(lastModifiedTimeMs),
+			)
+		},
+		globalCounter, tenant, cpStore,
+	)
+	if err != nil {
+		return count, err
+	}
+
+	if count > 0 {
+		if err := updateWatermark(ctx, chConn, table, newWatermark); err != nil {
+			return count, fmt.Errorf("update watermark: %w", err)
+		}
+		log.Printf("[%s] Watermark advanced to %d", table, newWatermark)
+	}
+	cpStore.MarkTableDone(table)
+	return count, nil
+}
+
+// ─── Incremental sync: demand_with_details_entity (two-phase) ───────────────
+//
+// Demand uses staging tables: if interrupted, the current phase restarts
+// from scratch (staging tables are dropped and recreated for the active phase).
+// Per-tenant checkpointing is used within each phase.
+
+func syncDemandWithDetails(
+	ctx context.Context, pgPool *pgxpool.Pool, chConn clickhouse.Conn,
+	batchSize, workers int, globalCounter *int64, tenant string,
+	cpStore *CheckpointStore,
+) (int64, error) {
+	const table = "demand_with_details_entity"
+
+	cp := cpStore.GetTableCheckpoint(table)
+	var watermark, newWatermark int64
+
+	if cp != nil && !cp.Completed {
+		watermark = cp.Watermark
+		newWatermark = cp.NewWatermark
+		log.Printf("[%s] Resuming interrupted sync (phase: %s, watermark: %d → %d)",
+			table, cp.Phase, watermark, newWatermark)
+	} else {
+		var err error
+		watermark, err = getWatermark(ctx, chConn, table)
+		if err != nil {
+			return 0, fmt.Errorf("get watermark: %w", err)
+		}
+		newWatermark, err = getMaxModifiedTime(ctx, pgPool,
+			`SELECT COALESCE(MAX(lastmodifiedtime), 0) FROM egbs_demand_v1 WHERE businessservice = 'PT'`)
+		if err != nil {
+			return 0, err
+		}
+		if newWatermark <= watermark {
+			log.Printf("[%s] No new data (watermark: %d, max in PG: %d)", table, watermark, newWatermark)
+			return 0, nil
+		}
+		cpStore.InitTable(table, watermark, newWatermark)
+		cpStore.SetPhase(table, "staging_demand")
+	}
+
+	wf := watermarkFilter("lastmodifiedtime", watermark)
+	phase := cpStore.GetPhase(table)
+	var totalSynced int64
+
+	// ── Phase 1: Stream demands to staging ──
+	if phase == "" || phase == "staging_demand" {
+		log.Printf("[%s] Phase 1: Creating staging tables & streaming demands...", table)
+		if err := createDemandStagingTables(ctx, chConn); err != nil {
+			return 0, fmt.Errorf("create staging: %w", err)
+		}
+
+		demandTenantQuery := fmt.Sprintf(
+			`SELECT DISTINCT tenantid FROM egbs_demand_v1 WHERE businessservice = 'PT'%s ORDER BY tenantid`, wf)
+
+		demandPgQuery := fmt.Sprintf(`
+			SELECT
+				COALESCE(tenantid,''), COALESCE(id,''), COALESCE(consumercode,''),
+				COALESCE(consumertype,''), COALESCE(businessservice,''), COALESCE(payer,''),
+				COALESCE(taxperiodfrom,0), COALESCE(taxperiodto,0), COALESCE(status,''),
+				CASE WHEN COALESCE(ispaymentcompleted,false) THEN 1 ELSE 0 END,
+				COALESCE(minimumamountpayable,0)::float8,
+				COALESCE(billexpirytime,0), COALESCE(fixedbillexpirydate,0),
+				COALESCE(createdby,''), COALESCE(createdtime,0),
+				COALESCE(lastmodifiedby,''), COALESCE(lastmodifiedtime,0)
+			FROM egbs_demand_v1
+			WHERE businessservice = 'PT' AND tenantid = $1%s`, wf)
+
+		// Use a separate checkpoint key for demand staging tenants
+		cpStore.InitTable("_stg_demand", 0, 0)
+
+		demandCount, err := parallelByTenant(ctx, pgPool, chConn,
+			"_stg_demand", demandTenantQuery, demandPgQuery,
+			`INSERT INTO _stg_demand`,
+			batchSize, workers, "id",
+			func(scan func(dest ...any) error, appendFn func(v ...any) error) error {
+				var (
+					tenantid, id, consumercode       string
+					consumertype, businesssvc, payer string
+					taxperiodfrom, taxperiodto       int64
+					status                           string
+					ispaymentcompleted               int32
+					minAmtPayable                    float64
+					billexpiry, fixedbillexpiry      int64
+					createdby                        string
+					createdtime                      int64
+					lastmodifiedby                   string
+					lastmodifiedtime                 int64
+				)
+				if err := scan(
+					&tenantid, &id, &consumercode,
+					&consumertype, &businesssvc, &payer,
+					&taxperiodfrom, &taxperiodto, &status,
+					&ispaymentcompleted, &minAmtPayable,
+					&billexpiry, &fixedbillexpiry,
+					&createdby, &createdtime,
+					&lastmodifiedby, &lastmodifiedtime,
+				); err != nil {
+					return fmt.Errorf("scan: %w", err)
+				}
+				return appendFn(
+					tenantid, id, consumercode,
+					consumertype, businesssvc, payer,
+					taxperiodfrom, taxperiodto, status,
+					uint8(ispaymentcompleted), minAmtPayable,
+					billexpiry, fixedbillexpiry,
+					createdby, createdtime,
+					lastmodifiedby, lastmodifiedtime,
+				)
+			},
+			globalCounter, tenant, cpStore,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("stream demands: %w", err)
+		}
+		totalSynced += demandCount
+		log.Printf("[%s] Staged %d demand rows", table, demandCount)
+		cpStore.SetPhase(table, "staging_detail")
+	}
+
+	// ── Phase 2: Stream demand details to staging ──
+	phase = cpStore.GetPhase(table)
+	if phase == "staging_detail" {
+		log.Printf("[%s] Phase 2: Streaming demand details...", table)
+		detailTenantQuery := fmt.Sprintf(
+			`SELECT DISTINCT tenantid FROM egbs_demand_v1 WHERE businessservice = 'PT'%s ORDER BY tenantid`, wf)
+
+		detailPgQuery := fmt.Sprintf(`
+			SELECT
+				COALESCE(dd.tenantid,''), COALESCE(dd.demandid,''),
+				COALESCE(dd.taxheadcode,''),
+				COALESCE(dd.taxamount,0)::float8, COALESCE(dd.collectionamount,0)::float8
+			FROM egbs_demanddetail_v1 dd
+			WHERE dd.tenantid = $1
+			  AND dd.demandid IN (
+				SELECT id FROM egbs_demand_v1
+				WHERE businessservice = 'PT' AND tenantid = $1%s
+			  )`, wf)
+
+		cpStore.InitTable("_stg_demanddetail", 0, 0)
+
+		detailCount, err := parallelByTenant(ctx, pgPool, chConn,
+			"_stg_demanddetail", detailTenantQuery, detailPgQuery,
+			`INSERT INTO _stg_demanddetail`,
+			batchSize, workers, "dd.id",
+			func(scan func(dest ...any) error, appendFn func(v ...any) error) error {
+				var (
+					tenantid, demandid, taxheadcode string
+					taxamount, collectionamount     float64
+				)
+				if err := scan(&tenantid, &demandid, &taxheadcode, &taxamount, &collectionamount); err != nil {
+					return fmt.Errorf("scan: %w", err)
+				}
+				return appendFn(tenantid, demandid, taxheadcode, taxamount, collectionamount)
+			},
+			globalCounter, tenant, cpStore,
+		)
+		if err != nil {
+			return totalSynced, fmt.Errorf("stream details: %w", err)
+		}
+		totalSynced += detailCount
+		log.Printf("[%s] Staged %d detail rows", table, detailCount)
+		cpStore.SetPhase(table, "pivot")
+	}
+
+	// ── Phase 3: Pivot in ClickHouse ──
+	phase = cpStore.GetPhase(table)
+	if phase == "pivot" {
+		log.Printf("[%s] Phase 3: Pivoting in ClickHouse...", table)
+		if err := pivotDemandInClickHouse(ctx, chConn); err != nil {
+			return totalSynced, fmt.Errorf("pivot: %w", err)
+		}
+		log.Printf("[%s] Pivot complete", table)
+
+		dropDemandStagingTables(ctx, chConn)
+
+		if err := updateWatermark(ctx, chConn, table, newWatermark); err != nil {
+			return totalSynced, fmt.Errorf("update watermark: %w", err)
+		}
+		log.Printf("[%s] Watermark advanced to %d", table, newWatermark)
+	}
+
+	cpStore.MarkTableDone(table)
+	cpStore.MarkTableDone("_stg_demand")
+	cpStore.MarkTableDone("_stg_demanddetail")
+	return totalSynced, nil
+}
+
+// Demand staging helpers
 
 func createDemandStagingTables(ctx context.Context, chConn clickhouse.Conn) error {
 	queries := []string{
-		`CREATE TABLE IF NOT EXISTS _stg_demand (
+		`DROP TABLE IF EXISTS _stg_demand`,
+		`DROP TABLE IF EXISTS _stg_demanddetail`,
+		`CREATE TABLE _stg_demand (
 			tenantid String, id String, consumercode String, consumertype String,
 			businessservice String, payer String, taxperiodfrom Int64, taxperiodto Int64,
 			status String, ispaymentcompleted UInt8, minimumamountpayable Float64,
 			billexpirytime Int64, fixedbillexpirydate Int64,
 			createdby String, createdtime Int64, lastmodifiedby String, lastmodifiedtime Int64
 		) ENGINE = MergeTree() ORDER BY (tenantid, id)`,
-		`CREATE TABLE IF NOT EXISTS _stg_demanddetail (
+		`CREATE TABLE _stg_demanddetail (
 			tenantid String, demandid String, taxheadcode String,
 			taxamount Float64, collectionamount Float64
 		) ENGINE = MergeTree() ORDER BY (tenantid, demandid)`,
 	}
 	for _, q := range queries {
 		if err := chConn.Exec(ctx, q); err != nil {
-			return fmt.Errorf("create staging table: %w", err)
+			return fmt.Errorf("staging table: %w", err)
 		}
 	}
 	return nil
@@ -1228,122 +1835,26 @@ func dropDemandStagingTables(ctx context.Context, chConn clickhouse.Conn) {
 	_ = chConn.Exec(ctx, "DROP TABLE IF EXISTS _stg_demanddetail")
 }
 
-func migrateDemandRaw(ctx context.Context, pgPool *pgxpool.Pool, chConn clickhouse.Conn, batchSize, workers int, globalCounter *int64, skipTenants map[string]bool, tenantFilter string) (int64, error) {
-	const tenantQuery = `SELECT DISTINCT tenantid FROM egbs_demand_v1 WHERE businessservice = 'PT' ORDER BY tenantid`
-	const pgQuery = `
-		SELECT
-			COALESCE(tenantid,''), COALESCE(id,''), COALESCE(consumercode,''),
-			COALESCE(consumertype,''), COALESCE(businessservice,''), COALESCE(payer,''),
-			COALESCE(taxperiodfrom,0), COALESCE(taxperiodto,0), COALESCE(status,''),
-			CASE WHEN COALESCE(ispaymentcompleted,false) THEN 1 ELSE 0 END,
-			COALESCE(minimumamountpayable,0)::float8,
-			COALESCE(billexpirytime,0), COALESCE(fixedbillexpirydate,0),
-			COALESCE(createdby,''), COALESCE(createdtime,0),
-			COALESCE(lastmodifiedby,''), COALESCE(lastmodifiedtime,0)
-		FROM egbs_demand_v1
-		WHERE businessservice = 'PT' AND tenantid = $1`
-	const chInsert = `INSERT INTO _stg_demand`
-
-	return parallelByTenant(ctx, pgPool, chConn,
-		"_stg_demand", tenantQuery, pgQuery, chInsert,
-		batchSize, workers, "id",
-		func(scan func(dest ...any) error, appendFn func(v ...any) error) error {
-			var (
-				tenantid, id, consumercode       string
-				consumertype, businesssvc, payer string
-				taxperiodfrom, taxperiodto       int64
-				status                           string
-				ispaymentcompleted               int32
-				minAmtPayable                    float64
-				billexpiry, fixedbillexpiry      int64
-				createdby                        string
-				createdtime                      int64
-				lastmodifiedby                   string
-				lastmodifiedtime                 int64
-			)
-			if err := scan(
-				&tenantid, &id, &consumercode,
-				&consumertype, &businesssvc, &payer,
-				&taxperiodfrom, &taxperiodto, &status,
-				&ispaymentcompleted, &minAmtPayable,
-				&billexpiry, &fixedbillexpiry,
-				&createdby, &createdtime,
-				&lastmodifiedby, &lastmodifiedtime,
-			); err != nil {
-				return fmt.Errorf("scan: %w", err)
-			}
-			return appendFn(
-				tenantid, id, consumercode,
-				consumertype, businesssvc, payer,
-				taxperiodfrom, taxperiodto, status,
-				uint8(ispaymentcompleted), minAmtPayable,
-				billexpiry, fixedbillexpiry,
-				createdby, createdtime,
-				lastmodifiedby, lastmodifiedtime,
-			)
-		},
-		globalCounter,
-		skipTenants,
-		tenantFilter,
-	)
-}
-
-
-
-func migrateDemandDetailRaw(ctx context.Context, pgPool *pgxpool.Pool, chConn clickhouse.Conn, batchSize, workers int, globalCounter *int64, skipTenants map[string]bool, tenantFilter string) (int64, error) {
-	const tenantQuery = `SELECT DISTINCT tenantid FROM egbs_demand_v1 WHERE businessservice = 'PT' ORDER BY tenantid`
-	const pgQuery = `
-		SELECT
-			COALESCE(dd.tenantid,''), COALESCE(dd.demandid,''),
-			COALESCE(dd.taxheadcode,''),
-			COALESCE(dd.taxamount,0)::float8, COALESCE(dd.collectionamount,0)::float8
-		FROM egbs_demanddetail_v1 dd
-		WHERE dd.tenantid = $1
-		  AND dd.demandid IN (
-			SELECT id FROM egbs_demand_v1 WHERE businessservice = 'PT' AND tenantid = $1
-		  )`
-	const chInsert = `INSERT INTO _stg_demanddetail`
-
-	return parallelByTenant(ctx, pgPool, chConn,
-		"_stg_demanddetail", tenantQuery, pgQuery, chInsert,
-		batchSize, workers, "dd.id",
-		func(scan func(dest ...any) error, appendFn func(v ...any) error) error {
-			var (
-				tenantid, demandid, taxheadcode string
-				taxamount, collectionamount     float64
-			)
-			if err := scan(&tenantid, &demandid, &taxheadcode, &taxamount, &collectionamount); err != nil {
-				return fmt.Errorf("scan: %w", err)
-			}
-			return appendFn(tenantid, demandid, taxheadcode, taxamount, collectionamount)
-		},
-		globalCounter,
-		skipTenants,
-		tenantFilter,
-	)
-}
-
 func pivotDemandInClickHouse(ctx context.Context, chConn clickhouse.Conn) error {
-	log.Println("[demand] Phase 3: Pivoting in ClickHouse (JOIN + GROUP BY)...")
 	pivotCtx, cancel := context.WithTimeout(ctx, 1*time.Hour)
 	defer cancel()
 
 	const pivotSQL = `
 INSERT INTO demand_with_details_entity (
 	tenant_id, demand_id, consumer_code, consumer_type, business_service, payer,
-	tax_period_from, tax_period_to, demand_status, is_payment_completed,
+	tax_period_from, tax_period_to, demand_status,
 	financial_year, minimum_amount_payable, bill_expiry_time, fixed_bill_expiry_date,
 	total_tax_amount, total_collection_amount,
 	pt_tax, pt_cancer_cess, pt_fire_cess, pt_roundoff,
 	pt_owner_exemption, pt_unit_usage_exemption,
 	pt_advance_carryforward,
-    pt_decimal_ceiling_debit,
-    pt_time_rebate,
-    pt_decimal_ceiling_credit,
-    pt_time_penalty,
-    pt_adhoc_penalty,
-    pt_adhoc_rebate,
-    pt_time_interest,
+	pt_decimal_ceiling_debit,
+	pt_time_rebate,
+	pt_decimal_ceiling_credit,
+	pt_time_penalty,
+	pt_adhoc_penalty,
+	pt_adhoc_rebate,
+	pt_time_interest,
 	outstanding_amount, is_paid,
 	created_by, created_time, last_modified_by, last_modified_time
 )
@@ -1352,7 +1863,7 @@ SELECT
 	d.consumercode, d.consumertype, d.businessservice, d.payer,
 	fromUnixTimestamp64Milli(d.taxperiodfrom, 'Asia/Kolkata'),
 	fromUnixTimestamp64Milli(d.taxperiodto, 'Asia/Kolkata'),
-	d.status, d.ispaymentcompleted,
+	d.status,
 	if(d.taxperiodfrom = 0, '',
 		concat(
 			toString(if(toMonth(toDateTime(intDiv(d.taxperiodfrom, 1000))) < 4,
@@ -1396,199 +1907,41 @@ SETTINGS join_algorithm = 'full_sorting_merge', max_execution_time = 3600, max_b
 	return chConn.Exec(pivotCtx, pivotSQL)
 }
 
-func migrateDemandWithDetails(ctx context.Context, pgPool *pgxpool.Pool, chConn clickhouse.Conn, batchSize, workers int, globalCounter *int64, resume bool, tenant string) (int64, error) {
-	// Two-phase demand migration for 1.8B+ detail rows:
-	// Phase 1-2: Stream raw demands + details from PG → CH staging (no JOIN/GROUP BY in PG)
-	// Phase 3:   Pivot in ClickHouse (JOIN + GROUP BY — CH is 10-100x faster at aggregation)
-
-	var skipTenants map[string]bool
-	if resume {
-		var err error
-		skipTenants, err = getCompletedTenants(ctx, pgPool, chConn,
-			"demand_with_details_entity",
-			`SELECT tenantid, count(*) FROM egbs_demand_v1 WHERE businessservice = 'PT' GROUP BY tenantid`,
-			`SELECT tenant_id, count() FROM demand_with_details_entity FINAL GROUP BY tenant_id`,
-		)
-		if err != nil {
-			return 0, fmt.Errorf("resume check: %w", err)
-		}
-	}
-
-	// Staging tables already exist with demand data loaded — skip creation and drop
-	// log.Println("[demand] Phase 1: Creating ClickHouse staging tables...")
-	// if err := createDemandStagingTables(ctx, chConn); err != nil {
-	// 	return 0, fmt.Errorf("create staging: %w", err)
-	// }
-	// defer dropDemandStagingTables(ctx, chConn)
-
-	log.Println("[demand] Phase 2: Streaming demand details from PostgreSQL (demand staging skipped)...")
-	var detailCount int64
-	var detailErr error
-
-	// Demand already in staging — only stream demand details
-	detailCount, detailErr = migrateDemandDetailRaw(ctx, pgPool, chConn, batchSize, workers, globalCounter, skipTenants, tenant)
-
-	if detailErr != nil {
-		return 0, fmt.Errorf("stream details: %w", detailErr)
-	}
-	log.Printf("[demand] Staged: demand (already loaded) + %d details", detailCount)
-
-	if err := pivotDemandInClickHouse(ctx, chConn); err != nil {
-		return detailCount, fmt.Errorf("pivot: %w", err)
-	}
-	log.Printf("[demand] Pivot complete → demand_with_details_entity")
-
-	return detailCount, nil
-}
-
-// ─── Table: property_audit_entity_v1 (from eg_pt_property_audit) ─────────
-
-func migratePropertyAudit(
-	ctx context.Context,
-	pgPool *pgxpool.Pool,
-	chConn clickhouse.Conn,
-	batchSize, workers int,
-	globalCounter *int64,
-	resume bool,
-	tenant string,
-) (int64, error) {
-
-	// tenantId lives inside the JSONB, not as a top-level column
-	const tenantQuery = `
-		SELECT DISTINCT property->>'tenantId'
-		FROM eg_pt_property_audit
-		WHERE property->>'tenantId' IS NOT NULL
-		ORDER BY 1`
-
-	const pgQuery = `
-		SELECT
-			COALESCE(property->>'tenantId', ''),
-			COALESCE(propertyid, ''),
-			COALESCE(property->>'propertyType', ''),
-			COALESCE(property->>'ownershipCategory', ''),
-			COALESCE(property->>'usageCategory', ''),
-			COALESCE(property->>'status', ''),
-			COALESCE(property->'workflow'->'state'->>'state', ''),
-			COALESCE((property->>'superBuiltUpArea')::float8, 0),
-			COALESCE((property->>'landArea')::float8, 0),
-			CASE WHEN property->'owners' IS NOT NULL AND jsonb_typeof(property->'owners') = 'array'
-				THEN ARRAY(SELECT elem->>'uuid' FROM jsonb_array_elements(property->'owners') AS elem WHERE elem->>'uuid' IS NOT NULL)
-				ELSE ARRAY[]::text[]
-			END,
-			auditcreatedtime,
-			COALESCE((property->'auditDetails'->>'createdTime')::bigint, 0),
-			COALESCE((property->'auditDetails'->>'lastModifiedTime')::bigint, 0)
-		FROM eg_pt_property_audit
-		WHERE property->>'tenantId' = $1`
-
-	const chInsert = `
-		INSERT INTO property_audit_entity_v1 (
-			tenant_id, property_id, property_type,
-			ownership_category, usage_category, property_status, workflow_state,
-			super_built_up_area, land_area, owner_user_ids,
-			audit_created_time, created_time, last_modified_time
-		)`
-
-	var skipTenants map[string]bool
-	if resume {
-		var err error
-		skipTenants, err = getCompletedTenants(
-			ctx, pgPool, chConn,
-			"property_audit_entity_v1",
-			`SELECT property->>'tenantId', count(*) FROM eg_pt_property_audit WHERE property->>'tenantId' IS NOT NULL GROUP BY property->>'tenantId'`,
-			`SELECT tenant_id, count() FROM property_audit_entity_v1 GROUP BY tenant_id`,
-		)
-		if err != nil {
-			return 0, fmt.Errorf("resume check: %w", err)
-		}
-	}
-
-	return parallelByTenant(
-		ctx, pgPool, chConn,
-		"property_audit_entity_v1",
-		tenantQuery,
-		pgQuery,
-		chInsert,
-		batchSize,
-		workers,
-		"audituuid",
-		func(scan func(dest ...any) error, appendFn func(v ...any) error) error {
-			var (
-				tenantID, propertyID       string
-				propertyType               string
-				ownershipCat, usageCat     string
-				propertyStatus             string
-				workflowState              string
-				superBuiltUpArea, landArea float64
-				ownerUserIDs               []string
-				auditCreatedTimeMs         int64
-				createdTimeMs              int64
-				lastModifiedTimeMs         int64
-			)
-
-			if err := scan(
-				&tenantID, &propertyID,
-				&propertyType,
-				&ownershipCat, &usageCat,
-				&propertyStatus,
-				&workflowState,
-				&superBuiltUpArea, &landArea,
-				&ownerUserIDs,
-				&auditCreatedTimeMs,
-				&createdTimeMs, &lastModifiedTimeMs,
-			); err != nil {
-				return fmt.Errorf("scan: %w", err)
-			}
-
-			return appendFn(
-				tenantID, propertyID,
-				propertyType,
-				ownershipCat, usageCat,
-				propertyStatus,
-				workflowState,
-				d(superBuiltUpArea), d(landArea),
-				ownerUserIDs,
-				msToISTVal(auditCreatedTimeMs),
-				msToISTVal(createdTimeMs),
-				msToISTVal(lastModifiedTimeMs),
-			)
-		},
-		globalCounter,
-		skipTenants,
-		tenant,
-	)
-}
-
 // ─── Main ───────────────────────────────────────────────────────────────────
 
-type migrationResult struct {
+type syncResult struct {
 	table   string
 	rows    int64
 	elapsed time.Duration
 	err     error
 }
 
-var allTables = []string{"property_address", "property_unit", "property_owner", "demand_details", "assessment", "payment_with_details", "bill", "property_audit"}
+var allTables = []string{
+	"property_address", "property_unit", "property_owner",
+	"demand_details", "assessment", "payment_with_details",
+	"bill", "property_audit",
+}
 
 func main() {
 	var (
-		pgHost     string
-		pgPort     int
-		pgDB       string
-		pgUser     string
-		pgPassword string
-		chHost     string
-		chPort     int
-		chDB       string
-		chUser     string
-		chPassword string
-		chProtocol string
-		chSecure   bool
-		batchSize  int
-		workers    int
-		tables     string
-		resume     bool
-		tenant     string
+		pgHost         string
+		pgPort         int
+		pgDB           string
+		pgUser         string
+		pgPassword     string
+		chHost         string
+		chPort         int
+		chDB           string
+		chUser         string
+		chPassword     string
+		chProtocol     string
+		chSecure       bool
+		batchSize      int
+		workers        int
+		tables         string
+		tenant         string
+		resetWM        bool
+		checkpointFile string
 	)
 
 	flag.StringVar(&pgHost, "pg-host", "localhost", "PostgreSQL host")
@@ -1597,17 +1950,18 @@ func main() {
 	flag.StringVar(&pgUser, "pg-user", "postgres", "PostgreSQL user")
 	flag.StringVar(&pgPassword, "pg-password", "", "PostgreSQL password")
 	flag.StringVar(&chHost, "ch-host", "z0tz5tcsm5.ap-south-1.aws.clickhouse.cloud", "ClickHouse host")
-	flag.IntVar(&chPort, "ch-port", 9440, "ClickHouse port (9440=secure native, 8443=secure HTTP)")
+	flag.IntVar(&chPort, "ch-port", 9440, "ClickHouse port")
 	flag.StringVar(&chDB, "ch-db", "punjab_property_tax", "ClickHouse database")
 	flag.StringVar(&chUser, "ch-user", "default", "ClickHouse user")
-	flag.StringVar(&chPassword, "ch-password", "", "ClickHouse password")
-	flag.StringVar(&chProtocol, "ch-protocol", "auto", "ClickHouse protocol: auto, http, native (auto=native for port 9440/9000, http otherwise)")
-	flag.BoolVar(&chSecure, "ch-secure", true, "Enable TLS for ClickHouse connection")
-	flag.IntVar(&batchSize, "batch-size", defaultBatchSize, "Rows per batch (fetch + insert)")
-	flag.IntVar(&workers, "workers", defaultWorkers, "Workers per table (parallel tenant processing)")
-	flag.StringVar(&tables, "tables", "all", "Comma-separated: property_address,property_unit,property_owner,demand_details (or 'all')")
-	flag.BoolVar(&resume, "resume", false, "Resume mode: skip tenants already fully migrated (compares PG vs CH row counts)")
-	flag.StringVar(&tenant, "tenant", "", "Migrate only this tenant ID (e.g. 'pb.amritsar'). If empty, all tenants are migrated.")
+	flag.StringVar(&chPassword, "ch-password", "XJRDo8_ZPh_qs", "ClickHouse password")
+	flag.StringVar(&chProtocol, "ch-protocol", "auto", "ClickHouse protocol: auto, http, native")
+	flag.BoolVar(&chSecure, "ch-secure", true, "Enable TLS for ClickHouse")
+	flag.IntVar(&batchSize, "batch-size", defaultBatchSize, "Rows per batch (default 20k for safer checkpointing)")
+	flag.IntVar(&workers, "workers", defaultWorkers, "Workers per table")
+	flag.StringVar(&tables, "tables", "all", "Comma-separated table names (or 'all')")
+	flag.StringVar(&tenant, "tenant", "", "Sync only this tenant ID (e.g. 'pb.amritsar')")
+	flag.BoolVar(&resetWM, "reset-watermark", false, "Reset watermarks for specified tables (forces full re-sync)")
+	flag.StringVar(&checkpointFile, "checkpoint-file", "sync_checkpoint.json", "Path to checkpoint file for resume on crash")
 	flag.Parse()
 
 	if pgDB == "" {
@@ -1616,46 +1970,63 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Determine tables to migrate
-	tablesToMigrate := allTables
-	if tables != "all" {
-		tablesToMigrate = strings.Split(tables, ",")
-		for i := range tablesToMigrate {
-			tablesToMigrate[i] = strings.TrimSpace(tablesToMigrate[i])
+	// Resolve checkpoint file to absolute path
+	if !filepath.IsAbs(checkpointFile) {
+		if wd, err := os.Getwd(); err == nil {
+			checkpointFile = filepath.Join(wd, checkpointFile)
 		}
 	}
 
-	// Determine ClickHouse protocol
+	tablesToSync := allTables
+	if tables != "all" {
+		tablesToSync = strings.Split(tables, ",")
+		for i := range tablesToSync {
+			tablesToSync[i] = strings.TrimSpace(tablesToSync[i])
+		}
+	}
+
 	var protocol clickhouse.Protocol
 	switch chProtocol {
 	case "http":
 		protocol = clickhouse.HTTP
 	case "native":
 		protocol = clickhouse.Native
-	default: // "auto"
+	default:
 		protocol = clickhouse.HTTP
 		if chPort == 9000 || chPort == 9440 {
 			protocol = clickhouse.Native
 		}
 	}
 
-	log.Println("PostgreSQL -> ClickHouse Migration (Go)")
+	log.Println("PostgreSQL -> ClickHouse Incremental Sync")
 	log.Println("==================================================")
 	log.Printf("PostgreSQL:      %s:%d/%s", pgHost, pgPort, pgDB)
 	log.Printf("ClickHouse:      %s:%d/%s (protocol=%v)", chHost, chPort, chDB, protocol)
 	log.Printf("Batch size:      %d", batchSize)
 	log.Printf("Workers/table:   %d", workers)
-	log.Printf("Tables:          %s", strings.Join(tablesToMigrate, ", "))
+	log.Printf("Tables:          %s", strings.Join(tablesToSync, ", "))
+	log.Printf("Checkpoint file: %s", checkpointFile)
 	if tenant != "" {
 		log.Printf("Tenant filter:   %s", tenant)
 	}
-	log.Printf("Resume mode:     %v", resume)
+	if resetWM {
+		log.Printf("Reset watermark: YES (will force full re-sync)")
+	}
 	log.Println("==================================================")
 
 	ctx := context.Background()
 
+	// ── Initialize checkpoint store ──
+	cpStore := NewCheckpointStore(checkpointFile)
+	if err := cpStore.Load(); err != nil {
+		log.Fatalf("Load checkpoint: %v", err)
+	}
+	// Check if resuming from a previous interrupted run
+	if _, err := os.Stat(checkpointFile); err == nil {
+		log.Printf("Loaded checkpoint from %s (resuming interrupted sync)", checkpointFile)
+	}
+
 	// Connect to PostgreSQL
-	// Pool size: 4 tables * N workers/table + buffer
 	log.Println("Connecting to PostgreSQL...")
 	pgConnStr := fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=disable",
 		pgHost, pgPort, pgDB, pgUser, pgPassword)
@@ -1701,11 +2072,41 @@ func main() {
 	if err != nil {
 		log.Fatalf("Open ClickHouse: %v", err)
 	}
-
 	if err := chConn.Ping(ctx); err != nil {
 		log.Fatalf("CH ping: %v", err)
 	}
 	log.Println("Connected to ClickHouse")
+
+	if err := ensureWatermarkTable(ctx, chConn); err != nil {
+		log.Fatalf("Create watermark table: %v", err)
+	}
+
+	// Reset watermarks if requested
+	tableNameMap := map[string]string{
+		"property_address":     "property_address_entity",
+		"property_unit":        "property_unit_entity",
+		"property_owner":       "property_owner_entity",
+		"demand_details":       "demand_with_details_entity",
+		"assessment":           "property_assessment_entity",
+		"payment_with_details": "payment_with_details_entity",
+		"bill":                 "bill_entity",
+		"property_audit":       "property_audit_entity",
+	}
+	if resetWM {
+		for _, t := range tablesToSync {
+			chTable := tableNameMap[t]
+			if chTable == "" {
+				continue
+			}
+			if err := updateWatermark(ctx, chConn, chTable, 0); err != nil {
+				log.Fatalf("Reset watermark for %s: %v", chTable, err)
+			}
+			log.Printf("Watermark reset to 0 for %s", chTable)
+		}
+		// Also remove checkpoint file since we're starting fresh
+		_ = cpStore.Remove()
+		cpStore = NewCheckpointStore(checkpointFile)
+	}
 
 	// Global progress counter + reporter
 	var globalCounter int64
@@ -1729,37 +2130,37 @@ func main() {
 		}
 	}()
 
-	// Build migration function map
-	type migrateFn func(context.Context, *pgxpool.Pool, clickhouse.Conn, int, int, *int64, bool, string) (int64, error)
-	migrationFns := map[string]migrateFn{
-		"property_address":     migratePropertyAddress,
-		"property_unit":        migratePropertyUnit,
-		"property_owner":       migratePropertyOwner,
-		"demand_details":       migrateDemandWithDetails,
-		"assessment":           migrateAssessment,
-		"payment_with_details": migratePaymentWithDetails,
-		"bill":                 migrateBill,
-		"property_audit":       migratePropertyAudit,
+	// Build sync function map
+	type syncFn func(context.Context, *pgxpool.Pool, clickhouse.Conn, int, int, *int64, string, *CheckpointStore) (int64, error)
+	syncFns := map[string]syncFn{
+		"property_address":     syncPropertyAddress,
+		"property_unit":        syncPropertyUnit,
+		"property_owner":       syncPropertyOwner,
+		"demand_details":       syncDemandWithDetails,
+		"assessment":           syncAssessment,
+		"payment_with_details": syncPaymentWithDetails,
+		"bill":                 syncBill,
+		"property_audit":       syncPropertyAudit,
 	}
 
-	// Run all table migrations concurrently
-	results := make([]migrationResult, len(tablesToMigrate))
+	// Run all table syncs concurrently
+	results := make([]syncResult, len(tablesToSync))
 	var wg sync.WaitGroup
 
-	for i, table := range tablesToMigrate {
-		fn, ok := migrationFns[table]
+	for i, table := range tablesToSync {
+		fn, ok := syncFns[table]
 		if !ok {
 			log.Printf("Unknown table: %s (skipping)", table)
-			results[i] = migrationResult{table: table, err: fmt.Errorf("unknown table")}
+			results[i] = syncResult{table: table, err: fmt.Errorf("unknown table")}
 			continue
 		}
 
 		wg.Add(1)
-		go func(idx int, tbl string, mFn migrateFn) {
+		go func(idx int, tbl string, sFn syncFn) {
 			defer wg.Done()
 			start := time.Now()
-			count, err := mFn(ctx, pgPool, chConn, batchSize, workers, &globalCounter, resume, tenant)
-			results[idx] = migrationResult{
+			count, err := sFn(ctx, pgPool, chConn, batchSize, workers, &globalCounter, tenant, cpStore)
+			results[idx] = syncResult{
 				table:   tbl,
 				rows:    count,
 				elapsed: time.Since(start),
@@ -1772,14 +2173,14 @@ func main() {
 	}
 
 	wg.Wait()
-	close(done) // stop progress reporter
+	close(done)
 
 	overallElapsed := time.Since(overallStart)
 
 	// Summary
 	log.Println()
 	log.Println("==================================================")
-	log.Println("MIGRATION SUMMARY")
+	log.Println("INCREMENTAL SYNC SUMMARY")
 	log.Println("==================================================")
 
 	var totalRows int64
@@ -1789,6 +2190,8 @@ func main() {
 		if r.err != nil {
 			status = fmt.Sprintf("FAILED: %v", r.err)
 			hasError = true
+		} else if r.rows == 0 {
+			status = "UP-TO-DATE"
 		}
 		totalRows += r.rows
 		log.Printf("  %-25s  %12d rows  %8.1fs  [%s]", r.table, r.rows, r.elapsed.Seconds(), status)
@@ -1800,7 +2203,21 @@ func main() {
 	}
 	log.Println("==================================================")
 
+	// Flush any throttled checkpoint data to disk before exit
+	if err := cpStore.Flush(); err != nil {
+		log.Printf("WARN: final checkpoint flush failed: %v", err)
+	}
+
 	if hasError {
+		log.Printf("Some tables failed — checkpoint preserved at %s", checkpointFile)
+		log.Println("Re-run the script to resume from where it stopped.")
 		os.Exit(1)
+	}
+
+	// All tables succeeded — clean up checkpoint file
+	if err := cpStore.Remove(); err != nil {
+		log.Printf("WARN: could not remove checkpoint file: %v", err)
+	} else {
+		log.Println("All tables synced successfully — checkpoint file removed.")
 	}
 }
