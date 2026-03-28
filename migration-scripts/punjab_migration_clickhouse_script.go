@@ -1745,8 +1745,16 @@ func syncDemandWithDetails(
 	// ── Phase 1: Stream demands to staging ──
 	if phase == "" || phase == "staging_demand" {
 		log.Printf("[%s] Phase 1: Creating staging tables & streaming demands...", table)
-		if err := createDemandStagingTables(ctx, chConn); err != nil {
-			return 0, fmt.Errorf("create staging: %w", err)
+		if phase == "" {
+			// Fresh start — drop and recreate staging tables
+			if err := createDemandStagingTables(ctx, chConn); err != nil {
+				return 0, fmt.Errorf("create staging: %w", err)
+			}
+		} else {
+			// Resuming — keep existing staging data, only create if not exists
+			if err := ensureDemandStagingTables(ctx, chConn); err != nil {
+				return 0, fmt.Errorf("ensure staging: %w", err)
+			}
 		}
 
 		demandTenantQuery := fmt.Sprintf(
@@ -1887,6 +1895,30 @@ func syncDemandWithDetails(
 
 // Demand staging helpers
 
+// ensureDemandStagingTables creates staging tables only if they don't exist (used on resume).
+func ensureDemandStagingTables(ctx context.Context, chConn clickhouse.Conn) error {
+	queries := []string{
+		`CREATE TABLE IF NOT EXISTS _stg_demand (
+			tenantid String, id String, consumercode String, consumertype String,
+			businessservice String, payer String, taxperiodfrom Int64, taxperiodto Int64,
+			status String, ispaymentcompleted UInt8, minimumamountpayable Float64,
+			billexpirytime Int64, fixedbillexpirydate Int64,
+			createdby String, createdtime Int64, lastmodifiedby String, lastmodifiedtime Int64
+		) ENGINE = MergeTree() ORDER BY (tenantid, id)`,
+		`CREATE TABLE IF NOT EXISTS _stg_demanddetail (
+			tenantid String, demandid String, taxheadcode String,
+			taxamount Float64, collectionamount Float64
+		) ENGINE = MergeTree() ORDER BY (tenantid, demandid)`,
+	}
+	for _, q := range queries {
+		if err := chConn.Exec(ctx, q); err != nil {
+			return fmt.Errorf("staging table: %w", err)
+		}
+	}
+	return nil
+}
+
+// createDemandStagingTables drops and recreates staging tables (used on fresh start).
 func createDemandStagingTables(ctx context.Context, chConn clickhouse.Conn) error {
 	queries := []string{
 		`DROP TABLE IF EXISTS _stg_demand`,
