@@ -396,6 +396,7 @@ func fetchPage(
 		Close()
 		Err() error
 	}
+	pgStart := time.Now()
 	err := withRetry("pg-query", func() error {
 		r, e := pgPool.Query(ctx, paginatedQuery)
 		if e != nil {
@@ -404,9 +405,12 @@ func fetchPage(
 		rows = r
 		return nil
 	})
+	pgElapsed := time.Since(pgStart)
 	if err != nil {
+		log.Printf("[PG-QUERY] FAILED after %s: %v", pgElapsed, err)
 		return nil, pageResult{err: fmt.Errorf("query: %w", err)}
 	}
+	log.Printf("[PG-QUERY] took %s", pgElapsed)
 
 	var b interface {
 		Append(v ...any) error
@@ -1585,7 +1589,7 @@ func syncDemandWithDetails(
 				COALESCE(consumertype,''), COALESCE(businessservice,''), COALESCE(payer,''),
 				COALESCE(taxperiodfrom,0), COALESCE(taxperiodto,0), COALESCE(status,''),
 				CASE WHEN COALESCE(ispaymentcompleted,false) THEN 1 ELSE 0 END,
-				COALESCE(minimumamountpayable,0)::float8,
+				COALESCE(minimumamountpayable,0)::numeric,
 				COALESCE(billexpirytime,0), COALESCE(fixedbillexpirydate,0),
 				COALESCE(createdby,''), COALESCE(createdtime,0),
 				COALESCE(lastmodifiedby,''), COALESCE(lastmodifiedtime,0)
@@ -1635,7 +1639,7 @@ func syncDemandWithDetails(
 					tenantid, id, consumercode,
 					consumertype, businesssvc, payer,
 					taxperiodfrom, taxperiodto, status,
-					uint8(ispaymentcompleted), minAmtPayable,
+					uint8(ispaymentcompleted), d(minAmtPayable),
 					billexpiry, fixedbillexpiry,
 					createdby, createdtime,
 					lastmodifiedby, lastmodifiedtime,
@@ -1665,7 +1669,7 @@ func syncDemandWithDetails(
 			SELECT
 				COALESCE(dd.tenantid,''), COALESCE(dd.demandid,''),
 				COALESCE(dd.taxheadcode,''),
-				COALESCE(dd.taxamount,0)::float8, COALESCE(dd.collectionamount,0)::float8
+				COALESCE(dd.taxamount,0)::numeric, COALESCE(dd.collectionamount,0)::numeric
 			FROM egbs_demanddetail_v1 dd
 			WHERE dd.demandid IN (
 				SELECT id FROM egbs_demand_v1
@@ -1694,7 +1698,7 @@ func syncDemandWithDetails(
 				if err := scan(&tenantid, &demandid, &taxheadcode, &taxamount, &collectionamount); err != nil {
 					return fmt.Errorf("scan: %w", err)
 				}
-				return appendFn(tenantid, demandid, taxheadcode, taxamount, collectionamount)
+				return appendFn(tenantid, demandid, taxheadcode, d(taxamount), d(collectionamount))
 			},
 			globalCounter,
 			startKey,
@@ -1740,13 +1744,13 @@ func ensureDemandStagingTables(ctx context.Context, chConn clickhouse.Conn) erro
 		`CREATE TABLE IF NOT EXISTS _stg_demand (
 			tenantid String, id String, consumercode String, consumertype String,
 			businessservice String, payer String, taxperiodfrom Int64, taxperiodto Int64,
-			status String, ispaymentcompleted UInt8, minimumamountpayable Float64,
+			status String, ispaymentcompleted UInt8, minimumamountpayable Decimal(18,4),
 			billexpirytime Int64, fixedbillexpirydate Int64,
 			createdby String, createdtime Int64, lastmodifiedby String, lastmodifiedtime Int64
 		) ENGINE = MergeTree() ORDER BY (tenantid, id)`,
 		`CREATE TABLE IF NOT EXISTS _stg_demanddetail (
 			tenantid String, demandid String, taxheadcode String,
-			taxamount Float64, collectionamount Float64
+			taxamount Decimal(18,4), collectionamount Decimal(18,4)
 		) ENGINE = MergeTree() ORDER BY (tenantid, demandid)`,
 	}
 	for _, q := range queries {
@@ -1765,13 +1769,13 @@ func createDemandStagingTables(ctx context.Context, chConn clickhouse.Conn) erro
 		`CREATE TABLE _stg_demand (
 			tenantid String, id String, consumercode String, consumertype String,
 			businessservice String, payer String, taxperiodfrom Int64, taxperiodto Int64,
-			status String, ispaymentcompleted UInt8, minimumamountpayable Float64,
+			status String, ispaymentcompleted UInt8, minimumamountpayable Decimal(18,4),
 			billexpirytime Int64, fixedbillexpirydate Int64,
 			createdby String, createdtime Int64, lastmodifiedby String, lastmodifiedtime Int64
 		) ENGINE = MergeTree() ORDER BY (tenantid, id)`,
 		`CREATE TABLE _stg_demanddetail (
 			tenantid String, demandid String, taxheadcode String,
-			taxamount Float64, collectionamount Float64
+			taxamount Decimal(18,4), collectionamount Decimal(18,4)
 		) ENGINE = MergeTree() ORDER BY (tenantid, demandid)`,
 	}
 	for _, q := range queries {
