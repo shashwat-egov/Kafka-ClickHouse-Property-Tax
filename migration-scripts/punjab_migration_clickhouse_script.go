@@ -35,6 +35,12 @@ const (
 	// 25k rows per batch — balances speed (fewer round trips) vs safety (checkpoint
 	// saves sort key after each batch, so at most 25k rows are re-synced on crash).
 	defaultBatchSize = 25_000
+
+	// queryTimeout caps how long a single PG/CH operation can block.
+	// Each batch query fetches at most 25k rows, so 5 minutes is generous.
+	// This prevents goroutines from hanging forever on dead connections
+	// (e.g. silent VPN drop where no TCP RST is sent).
+	queryTimeout = 2 * time.Minute
 )
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -96,6 +102,8 @@ func isConnectionError(err error) bool {
 		"i/o timeout", "eof", "no such host", "network is unreachable",
 		"connection timed out", "dial tcp", "write: connection reset",
 		"read: connection reset", "unexpected eof", "transport",
+		"terminating connection", // PG admin shutdown / container stop
+		"context deadline exceeded",       // our queryTimeout fired
 	} {
 		if strings.Contains(msg, keyword) {
 			return true
@@ -363,7 +371,9 @@ func (cs *CheckpointStore) ResetTable(table string) {
 // ─── Watermark management (ClickHouse) ──────────────────────────────────────
 
 func ensureWatermarkTable(ctx context.Context, chConn clickhouse.Conn) error {
-	return chConn.Exec(ctx, `
+	queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+	return chConn.Exec(queryCtx, `
 		CREATE TABLE IF NOT EXISTS _incremental_sync_watermark (
 			table_name         String,
 			last_sync_epoch_ms Int64,
@@ -374,8 +384,10 @@ func ensureWatermarkTable(ctx context.Context, chConn clickhouse.Conn) error {
 }
 
 func getWatermark(ctx context.Context, chConn clickhouse.Conn, tableName string) (int64, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
 	var wm int64
-	err := chConn.QueryRow(ctx,
+	err := chConn.QueryRow(queryCtx,
 		`SELECT last_sync_epoch_ms FROM _incremental_sync_watermark FINAL WHERE table_name = $1`,
 		tableName,
 	).Scan(&wm)
@@ -389,7 +401,9 @@ func getWatermark(ctx context.Context, chConn clickhouse.Conn, tableName string)
 }
 
 func updateWatermark(ctx context.Context, chConn clickhouse.Conn, tableName string, epochMs int64) error {
-	return chConn.Exec(ctx,
+	queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+	return chConn.Exec(queryCtx,
 		`INSERT INTO _incremental_sync_watermark (table_name, last_sync_epoch_ms) VALUES ($1, $2)`,
 		tableName, epochMs,
 	)
@@ -398,7 +412,9 @@ func updateWatermark(ctx context.Context, chConn clickhouse.Conn, tableName stri
 func getMaxModifiedTime(ctx context.Context, pgPool *pgxpool.Pool, query string) (int64, error) {
 	var maxMs int64
 	err := withRetry("pg-max-modified-time", func() error {
-		return pgPool.QueryRow(ctx, query).Scan(&maxMs)
+		queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+		defer cancel()
+		return pgPool.QueryRow(queryCtx, query).Scan(&maxMs)
 	})
 	if err != nil {
 		return 0, fmt.Errorf("max modified time: %w", err)
@@ -432,68 +448,70 @@ func fetchPage(
 	Send() error
 	Abort() error
 }, result pageResult) {
-	var rows interface {
-		Next() bool
-		Scan(dest ...any) error
-		Close()
-		Err() error
-	}
-	pgStart := time.Now()
-	err := withRetry("pg-query", func() error {
-		r, e := pgPool.Query(ctx, paginatedQuery)
-		if e != nil {
-			return e
-		}
-		rows = r
-		return nil
-	})
-	pgElapsed := time.Since(pgStart)
-	if err != nil {
-		log.Printf("[PG-QUERY] FAILED after %s: %v", pgElapsed, err)
-		return nil, pageResult{err: fmt.Errorf("query: %w", err)}
-	}
-	log.Printf("[PG-QUERY] took %s", pgElapsed)
-
 	var b interface {
 		Append(v ...any) error
 		Send() error
 		Abort() error
 	}
-	err = withRetry("ch-prepare-batch", func() error {
-		var e error
-		b, e = chConn.PrepareBatch(ctx, chInsert)
-		return e
-	})
-	if err != nil {
-		rows.Close()
-		return nil, pageResult{err: fmt.Errorf("prepare batch: %w", err)}
-	}
-
 	var keysetVal string
-	var allDest []any
-	count := 0
-	for rows.Next() {
-		wrappedScan := func(dest ...any) error {
-			needed := 1 + len(dest)
-			if cap(allDest) < needed {
-				allDest = make([]any, 0, needed)
-			}
-			allDest = allDest[:0]
-			allDest = append(allDest, &keysetVal)
-			allDest = append(allDest, dest...)
-			return rows.Scan(allDest...)
-		}
-		if err := processRow(wrappedScan, b.Append); err != nil {
-			rows.Close()
-			return nil, pageResult{err: fmt.Errorf("row %d: %w", count, err)}
-		}
-		count++
-	}
-	rows.Close()
+	var count int
 
-	if err := rows.Err(); err != nil {
-		return nil, pageResult{err: fmt.Errorf("rows err: %w", err)}
+	// Retry wraps the entire PG query + row iteration + CH batch buffer cycle.
+	// If PG dies mid-iteration (e.g. container stopped, connection killed),
+	// the error is caught and the whole page is retried from scratch.
+	pgStart := time.Now()
+	err := withRetry("pg-fetch-page", func() error {
+		queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+		defer cancel()
+
+		// Reset state for each retry attempt
+		keysetVal = ""
+		count = 0
+
+		// Query PG
+		rows, e := pgPool.Query(queryCtx, paginatedQuery)
+		if e != nil {
+			return fmt.Errorf("query: %w", e)
+		}
+		defer rows.Close()
+
+		// Prepare CH batch
+		var batchErr error
+		b, batchErr = chConn.PrepareBatch(ctx, chInsert)
+		if batchErr != nil {
+			return fmt.Errorf("prepare batch: %w", batchErr)
+		}
+
+		// Iterate rows and buffer into CH batch
+		var allDest []any
+		for rows.Next() {
+			wrappedScan := func(dest ...any) error {
+				needed := 1 + len(dest)
+				if cap(allDest) < needed {
+					allDest = make([]any, 0, needed)
+				}
+				allDest = allDest[:0]
+				allDest = append(allDest, &keysetVal)
+				allDest = append(allDest, dest...)
+				return rows.Scan(allDest...)
+			}
+			if err := processRow(wrappedScan, b.Append); err != nil {
+				return fmt.Errorf("row %d: %w", count, err)
+			}
+			count++
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("rows err: %w", err)
+		}
+		return nil
+	})
+	pgElapsed := time.Since(pgStart)
+	if err != nil {
+		log.Printf("[PG-FETCH] FAILED after %s: %v", pgElapsed, err)
+		return nil, pageResult{err: err}
 	}
+	log.Printf("[PG-FETCH] %d rows in %s", count, pgElapsed)
+
 	return b, pageResult{lastKey: keysetVal, count: count}
 }
 
