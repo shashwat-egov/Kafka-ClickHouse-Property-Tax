@@ -89,12 +89,18 @@ EMPTY
 AS
 SELECT
     tenant_id,
+    concat(
+        toString(toYear(created_time) - if(toMonth(created_time) < 4, 1, 0)),
+        '-',
+        substring(toString(toYear(created_time) + if(toMonth(created_time) >= 4, 1, 0)), 3, 2)
+    ) AS financial_year,
     formatDateTime(created_time, '%Y-%m') AS year_month,
     payment_status,
+    count() AS total_payments,
     sum(total_amount_paid) AS total_collected_amount
 FROM punjab_property_tax.payment_with_details_entity FINAL
 WHERE businessservice = 'PT'
-GROUP BY tenant_id, year_month, payment_status;
+GROUP BY tenant_id, financial_year, year_month, payment_status;
 
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_mart_properties_with_demand_by_fy
