@@ -102,7 +102,7 @@ func isConnectionError(err error) bool {
 		"i/o timeout", "eof", "no such host", "network is unreachable",
 		"connection timed out", "dial tcp", "write: connection reset",
 		"read: connection reset", "unexpected eof", "transport",
-		"terminating connection", // PG admin shutdown / container stop
+		"terminating connection", "57p01", // PG admin shutdown / container stop
 		"context deadline exceeded",       // our queryTimeout fired
 	} {
 		if strings.Contains(msg, keyword) {
@@ -772,7 +772,9 @@ func syncPropertyAddress(
 	}
 
 	if count > 0 {
-		if err := updateWatermark(ctx, chConn, table, newWatermark); err != nil {
+		if err := withRetry("ch-update-watermark", func() error {
+				return updateWatermark(ctx, chConn, table, newWatermark)
+			}); err != nil {
 			return count, fmt.Errorf("update watermark: %w", err)
 		}
 		log.Printf("[%s] Watermark advanced to %d", table, newWatermark)
@@ -913,7 +915,9 @@ func syncPropertyUnit(
 	}
 
 	if count > 0 {
-		if err := updateWatermark(ctx, chConn, table, newWatermark); err != nil {
+		if err := withRetry("ch-update-watermark", func() error {
+				return updateWatermark(ctx, chConn, table, newWatermark)
+			}); err != nil {
 			return count, fmt.Errorf("update watermark: %w", err)
 		}
 		log.Printf("[%s] Watermark advanced to %d", table, newWatermark)
@@ -1041,7 +1045,9 @@ func syncPropertyOwner(
 	}
 
 	if count > 0 {
-		if err := updateWatermark(ctx, chConn, table, newWatermark); err != nil {
+		if err := withRetry("ch-update-watermark", func() error {
+				return updateWatermark(ctx, chConn, table, newWatermark)
+			}); err != nil {
 			return count, fmt.Errorf("update watermark: %w", err)
 		}
 		log.Printf("[%s] Watermark advanced to %d", table, newWatermark)
@@ -1158,7 +1164,9 @@ func syncAssessment(
 	}
 
 	if count > 0 {
-		if err := updateWatermark(ctx, chConn, table, newWatermark); err != nil {
+		if err := withRetry("ch-update-watermark", func() error {
+				return updateWatermark(ctx, chConn, table, newWatermark)
+			}); err != nil {
 			return count, fmt.Errorf("update watermark: %w", err)
 		}
 		log.Printf("[%s] Watermark advanced to %d", table, newWatermark)
@@ -1328,7 +1336,9 @@ func syncPaymentWithDetails(
 	}
 
 	if count > 0 {
-		if err := updateWatermark(ctx, chConn, table, newWatermark); err != nil {
+		if err := withRetry("ch-update-watermark", func() error {
+				return updateWatermark(ctx, chConn, table, newWatermark)
+			}); err != nil {
 			return count, fmt.Errorf("update watermark: %w", err)
 		}
 		log.Printf("[%s] Watermark advanced to %d", table, newWatermark)
@@ -1442,7 +1452,9 @@ func syncBill(
 	}
 
 	if count > 0 {
-		if err := updateWatermark(ctx, chConn, table, newWatermark); err != nil {
+		if err := withRetry("ch-update-watermark", func() error {
+				return updateWatermark(ctx, chConn, table, newWatermark)
+			}); err != nil {
 			return count, fmt.Errorf("update watermark: %w", err)
 		}
 		log.Printf("[%s] Watermark advanced to %d", table, newWatermark)
@@ -1576,7 +1588,9 @@ func syncPropertyAudit(
 	}
 
 	if count > 0 {
-		if err := updateWatermark(ctx, chConn, table, newWatermark); err != nil {
+		if err := withRetry("ch-update-watermark", func() error {
+				return updateWatermark(ctx, chConn, table, newWatermark)
+			}); err != nil {
 			return count, fmt.Errorf("update watermark: %w", err)
 		}
 		log.Printf("[%s] Watermark advanced to %d", table, newWatermark)
@@ -1786,7 +1800,9 @@ func syncDemandWithDetails(
 
 		dropDemandStagingTables(ctx, chConn)
 
-		if err := updateWatermark(ctx, chConn, table, newWatermark); err != nil {
+		if err := withRetry("ch-update-watermark", func() error {
+				return updateWatermark(ctx, chConn, table, newWatermark)
+			}); err != nil {
 			return totalSynced, fmt.Errorf("update watermark: %w", err)
 		}
 		log.Printf("[%s] Watermark advanced to %d", table, newWatermark)
@@ -1967,7 +1983,7 @@ func main() {
 	flag.IntVar(&chPort, "ch-port", 9440, "ClickHouse port")
 	flag.StringVar(&chDB, "ch-db", "increment_migration_test", "ClickHouse database")
 	flag.StringVar(&chUser, "ch-user", "default", "ClickHouse user")
-	flag.StringVar(&chPassword, "ch-password", "", "ClickHouse password")
+	flag.StringVar(&chPassword, "ch-password", "XJRDo8_ZPh_qs", "ClickHouse password")
 	flag.StringVar(&chProtocol, "ch-protocol", "auto", "ClickHouse protocol: auto, http, native")
 	flag.BoolVar(&chSecure, "ch-secure", true, "Enable TLS for ClickHouse")
 	flag.IntVar(&batchSize, "batch-size", defaultBatchSize, "Rows per batch (default 25k for safer checkpointing)")
@@ -2107,7 +2123,9 @@ func main() {
 			if chTable == "" {
 				continue
 			}
-			if err := updateWatermark(ctx, chConn, chTable, 0); err != nil {
+			if err := withRetry("ch-reset-watermark", func() error {
+				return updateWatermark(ctx, chConn, chTable, 0)
+			}); err != nil {
 				log.Fatalf("Reset watermark for %s: %v", chTable, err)
 			}
 			log.Printf("Watermark reset to 0 for %s", chTable)
