@@ -87,8 +87,7 @@ func quoteLiteral(s string) string {
 
 const (
 	maxRetries    = 20
-	retryBaseWait = 15 * time.Second // first retry waits 15s, then 30s, capped at 60s
-	retryMaxWait  = 60 * time.Second
+	retryBaseWait = 15 * time.Second // fixed 15s wait between each retry attempt
 )
 
 // isConnectionError returns true if the error looks like a network/connection issue.
@@ -157,10 +156,7 @@ func withRetry(label string, fn func() error) error {
 		if !isConnectionError(lastErr) {
 			return lastErr // not a connection error, don't retry
 		}
-		wait := retryBaseWait * time.Duration(attempt)
-		if wait > retryMaxWait {
-			wait = retryMaxWait
-		}
+		wait := retryBaseWait
 		log.Printf("[RETRY] %s: attempt %d/%d failed: %v — waiting %s before retry",
 			label, attempt, maxRetries, lastErr, wait)
 		time.Sleep(wait)
