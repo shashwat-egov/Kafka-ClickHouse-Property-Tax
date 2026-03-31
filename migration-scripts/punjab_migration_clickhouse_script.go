@@ -452,61 +452,83 @@ func fetchPage(
 	var keysetVal string
 	var count int
 
-	// Retry wraps the entire PG query + row iteration + CH batch buffer cycle.
-	// If PG dies mid-iteration (e.g. container stopped, connection killed),
-	// the error is caught and the whole page is retried from scratch.
+	// Step 1: Query PG and iterate rows into memory-buffered scan results.
+	// Retry covers the full query+iterate cycle — if PG dies mid-iteration,
+	// the whole page is retried from scratch.
+	type scannedRow struct {
+		keysetVal string
+		dest      []any
+	}
+	var scannedRows []scannedRow
+
 	pgStart := time.Now()
-	err := withRetry("pg-fetch-page", func() error {
+	err := withRetry("pg-query", func() error {
 		queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
 
-		// Reset state for each retry attempt
 		keysetVal = ""
 		count = 0
+		scannedRows = scannedRows[:0]
 
-		// Query PG
 		rows, e := pgPool.Query(queryCtx, paginatedQuery)
 		if e != nil {
-			return fmt.Errorf("query: %w", e)
+			return e
 		}
 		defer rows.Close()
 
-		// Prepare CH batch
-		var batchErr error
-		b, batchErr = chConn.PrepareBatch(ctx, chInsert)
-		if batchErr != nil {
-			return fmt.Errorf("prepare batch: %w", batchErr)
-		}
-
-		// Iterate rows and buffer into CH batch
-		var allDest []any
 		for rows.Next() {
+			var rowKey string
+			var rowDest []any
 			wrappedScan := func(dest ...any) error {
-				needed := 1 + len(dest)
-				if cap(allDest) < needed {
-					allDest = make([]any, 0, needed)
-				}
-				allDest = allDest[:0]
-				allDest = append(allDest, &keysetVal)
+				allDest := make([]any, 0, 1+len(dest))
+				allDest = append(allDest, &rowKey)
 				allDest = append(allDest, dest...)
 				return rows.Scan(allDest...)
 			}
-			if err := processRow(wrappedScan, b.Append); err != nil {
+			if err := processRow(wrappedScan, func(v ...any) error {
+				copied := make([]any, len(v))
+				copy(copied, v)
+				rowDest = copied
+				return nil
+			}); err != nil {
 				return fmt.Errorf("row %d: %w", count, err)
 			}
+			scannedRows = append(scannedRows, scannedRow{keysetVal: rowKey, dest: rowDest})
+			keysetVal = rowKey
 			count++
 		}
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("rows err: %w", err)
-		}
-		return nil
+		return rows.Err()
 	})
 	pgElapsed := time.Since(pgStart)
 	if err != nil {
-		log.Printf("[PG-FETCH] FAILED after %s: %v", pgElapsed, err)
-		return nil, pageResult{err: err}
+		log.Printf("[pg-query] FAILED after %s: %v", pgElapsed, err)
+		return nil, pageResult{err: fmt.Errorf("pg query: %w", err)}
 	}
-	log.Printf("[PG-FETCH] %d rows in %s", count, pgElapsed)
+	log.Printf("[pg-query] %d rows in %s", count, pgElapsed)
+
+	if count == 0 {
+		return nil, pageResult{lastKey: keysetVal, count: 0}
+	}
+
+	// Step 2: Prepare CH batch and append buffered rows.
+	// Separate retry so CH errors get their own label.
+	err = withRetry("ch-batch-prepare", func() error {
+		var batchErr error
+		b, batchErr = chConn.PrepareBatch(ctx, chInsert)
+		if batchErr != nil {
+			return batchErr
+		}
+		for _, row := range scannedRows {
+			if err := b.Append(row.dest...); err != nil {
+				return fmt.Errorf("append: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("[ch-batch-prepare] FAILED: %v", err)
+		return nil, pageResult{err: fmt.Errorf("ch prepare: %w", err)}
+	}
 
 	return b, pageResult{lastKey: keysetVal, count: count}
 }
