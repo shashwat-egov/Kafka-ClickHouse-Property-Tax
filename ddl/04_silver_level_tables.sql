@@ -358,3 +358,37 @@ ENGINE = MergeTree
 ORDER BY (tenant_id, property_id, audit_created_time)
 SETTINGS index_granularity = 8192;
 
+CREATE TABLE IF NOT EXISTS punjab_property_tax.bill_detail_entity
+(
+    _ingested_at DateTime64(3) DEFAULT now64(3),
+    id String,
+    tenant_id String,
+    demand_id String,
+    bill_id String,
+    amount Decimal(12, 2),
+    amount_paid Decimal(12, 2),
+    from_period Int64,
+    to_period Int64,
+    additional_details String,
+    channel String,
+    voucher_header String,
+    boundary String,
+    collection_type String,
+    bill_description String,
+    expiry_date String,
+    display_message String,
+    call_back_for_apportioning String,
+    cancellation_remarks String,
+
+    -- Audit (from bill)
+    created_by String,
+    created_time DateTime64(3),
+    last_modified_by String,
+    last_modified_time DateTime64(3),
+
+    --Calculate financial year based on from period and to period
+    financial_year String
+)
+ENGINE = ReplacingMergeTree(last_modified_time)
+ORDER BY (tenant_id, id)
+SETTINGS index_granularity = 8192;
