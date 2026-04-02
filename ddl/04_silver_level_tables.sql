@@ -387,7 +387,7 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.property_audit_entity
     last_modified_time DateTime64(3),
 
     --Calculate financial year based on from period and to period
-    financial_year
+    financial_year String
 )
 ENGINE = ReplacingMergeTree(last_modified_time)
 ORDER BY (tenant_id, id)
