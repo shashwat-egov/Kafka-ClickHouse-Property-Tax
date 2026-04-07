@@ -424,3 +424,24 @@ SELECT
 FROM punjab_property_tax.payment_with_details_entity FINAL
 WHERE businessservice = 'PT'
 GROUP BY tenant_id, payment_status, collection_date;
+
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS punjab_property_tax.rmv_mart_collection_by_transaction_fy_and_demand_fy
+REFRESH EVERY 1000 YEAR
+TO punjab_property_tax.mart_collection_by_transaction_fy_and_demand_fy
+EMPTY
+AS
+SELECT
+    p.tenant_id,
+    p.financial_year AS transaction_financial_year,
+    bd.financial_year AS bill_financial_year,
+    sum(bd.amount_paid) AS total_amount_paid
+FROM punjab_property_tax.payment_with_details_entity p FINAL
+INNER JOIN punjab_property_tax.bill_detail_entity bd FINAL
+    ON p.tenant_id = bd.tenant_id
+   AND p.billid = bd.bill_id
+WHERE p.businessservice = 'PT' AND p.payment_status != 'CANCELLED'
+GROUP BY
+    p.tenant_id,
+    p.financial_year,
+    bd.financial_year;
