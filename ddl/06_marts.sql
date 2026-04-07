@@ -437,7 +437,7 @@ SELECT
     bd.financial_year AS bill_financial_year,
     sum(bd.amount_paid) AS total_amount_paid
 FROM punjab_property_tax.payment_with_details_entity p FINAL
-INNER JOIN punjab_property_tax.bill_detail_entity_v1 bd FINAL
+INNER JOIN punjab_property_tax.bill_detail_entity bd FINAL
     ON p.tenant_id = bd.tenant_id
    AND p.billid = bd.bill_id
 WHERE p.businessservice = 'PT' AND p.payment_status != 'CANCELLED'
