@@ -90,9 +90,9 @@ AS
 SELECT
     tenant_id,
     concat(
-        toString(toYear(created_time) - if(toMonth(created_time) < 4, 1, 0)),
+        toString(toYear(transaction_date) - if(toMonth(transaction_date) < 4, 1, 0)),
         '-',
-        substring(toString(toYear(created_time) + if(toMonth(created_time) >= 4, 1, 0)), 3, 2)
+        substring(toString(toYear(transaction_date) + if(toMonth(transaction_date) >= 4, 1, 0)), 3, 2)
     ) AS financial_year,
     formatDateTime(created_time, '%Y-%m') AS year_month,
     payment_status,
