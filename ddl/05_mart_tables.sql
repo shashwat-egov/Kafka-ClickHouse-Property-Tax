@@ -234,7 +234,7 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_collection_by_transaction_fy
     tenant_id LowCardinality(String),
     transaction_financial_year LowCardinality(String),
     bill_financial_year LowCardinality(String),
-    total_amount_paid UInt64
+    total_amount_paid Decimal(18,4)
 )
 ENGINE = MergeTree
 ORDER BY (tenant_id, transaction_financial_year, bill_financial_year)
