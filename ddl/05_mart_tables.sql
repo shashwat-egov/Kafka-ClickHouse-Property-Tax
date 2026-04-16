@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_demand_and_collection_summar
     financial_year LowCardinality(String),
     total_demand Decimal(18, 2),
     total_collection Decimal(18, 2),
-    total_outstanding Decimal(18, 2)
+    total_outstanding Decimal(18, 4)
 )
 ENGINE = MergeTree
 ORDER BY (tenant_id, financial_year)
@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.mart_defaulters
     financial_year LowCardinality(String),
     total_tax_amount Decimal(12, 2),
     total_collection_amount Decimal(12, 2),
-    outstanding_amount Decimal(12, 2)
+    outstanding_amount Decimal(12, 4)
 )
 ENGINE = MergeTree
 ORDER BY (tenant_id, financial_year)
