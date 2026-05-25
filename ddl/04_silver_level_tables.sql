@@ -347,7 +347,7 @@ CREATE TABLE IF NOT EXISTS punjab_property_tax.property_audit_entity
     workflow_state LowCardinality(String),
 
     super_built_up_area Decimal(18, 2),
-    builtUpArea Decimal(18, 2),
+    built_up_area Decimal(18, 2),
     land_area Decimal(18, 2),
     owner_count UInt8,
 
