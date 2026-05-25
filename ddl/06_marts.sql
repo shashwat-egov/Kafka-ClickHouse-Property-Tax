@@ -162,6 +162,7 @@ SELECT
        OVER w, 1, 0) AS usage_category_changed,
 
     if(super_built_up_area != lagInFrame(super_built_up_area, 1, super_built_up_area)
+       OVER w OR built_up_area != lagInFrame(built_up_area, 1, built_up_area) 
        OVER w OR land_area != lagInFrame(land_area, 1, land_area)
        OVER w, 1, 0) AS area_changed,
 
