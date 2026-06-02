@@ -61,7 +61,7 @@ ENGINE = Kafka
 SETTINGS
     kafka_broker_list = 'release-name-kafka.kafka-kraft.svc.cluster.local:9092',
     kafka_topic_list = 'egov.collection.payment-create',
-    kafka_group_name = 'clickhouse-bill-consumer',
+    kafka_group_name = 'clickhouse-payment-consumer',
     kafka_format = 'JSONAsString',
     kafka_num_consumers = 3,
     kafka_max_block_size = 65536,
