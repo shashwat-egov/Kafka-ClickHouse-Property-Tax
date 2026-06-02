@@ -29,13 +29,12 @@ Architecture (Extract → Transform+Load per chunk):
     extract_bill_events  (count + pass window metadata via XCom)
         -> transform_load_bill_events  (per chunk: fetch → transform → insert)
             -> bill_entity               (one row per bill)
-            -> bill_detail_entity        (one row per billDetail entry)
-
-  Bill pipeline (runs in parallel with all other pipelines):
-    extract_bill_events  (count + pass window metadata via XCom)
-        -> transform_load_bill_events  (per chunk: fetch → transform → insert)
-            -> bill_entity               (one row per bill)
             -> bill_detail_entity        (one row per billDetail inside each bill)
+
+  Assessment pipeline (runs in parallel with all other pipelines):
+    extract_assessment_events  (count + pass window metadata via XCom)
+        -> transform_load_assessment_events  (per chunk: fetch → transform → insert)
+            -> property_assessment_entity    (one row per assessment)
 
   Extract passes only lightweight metadata (window + count) via XCom.
   Transform+Load reads from ClickHouse one chunk at a time, transforms it,
@@ -329,6 +328,40 @@ def count_bill_events(client, window_start: datetime,
     """Count total bill events in the time window."""
     result = client.query(
         "SELECT count() FROM bill_events_raw "
+        "WHERE event_time >= {start:DateTime64(3)} "
+        "AND event_time < {end:DateTime64(3)}",
+        parameters={'start': window_start, 'end': window_end},
+    )
+    return result.result_rows[0][0]
+
+
+def fetch_assessment_events(client, window_start: datetime,
+                            window_end: datetime, limit: int = None,
+                            offset: int = 0) -> List[str]:
+    """Fetch raw JSON strings from assessment_events_raw within the time window."""
+    query = (
+        "SELECT raw FROM assessment_events_raw "
+        "WHERE event_time >= {start:DateTime64(3)} "
+        "AND event_time < {end:DateTime64(3)} "
+        "ORDER BY event_time "
+    )
+
+    params = {'start': window_start, 'end': window_end}
+
+    if limit is not None:
+        query += "LIMIT {limit:UInt64} OFFSET {offset:UInt64}"
+        params['limit'] = limit
+        params['offset'] = offset
+
+    result = client.query(query, parameters=params)
+    return [r[0] for r in result.result_rows]
+
+
+def count_assessment_events(client, window_start: datetime,
+                            window_end: datetime) -> int:
+    """Count total assessment events in the time window."""
+    result = client.query(
+        "SELECT count() FROM assessment_events_raw "
         "WHERE event_time >= {start:DateTime64(3)} "
         "AND event_time < {end:DateTime64(3)}",
         parameters={'start': window_start, 'end': window_end},
@@ -667,6 +700,34 @@ def extract_payment(event: dict, payment: dict) -> dict:
         'billid': bill.get('id', ''),
         'manualreceiptnumber': detail.get('manualReceiptNumber', ''),
         'manualreceiptdate': parse_ts(detail.get('manualReceiptDate')) or EPOCH,
+    }
+
+
+def extract_assessment(event: dict) -> dict:
+    """Map a raw assessment event to a property_assessment_entity row.
+
+    The assessment payload is the top-level event itself — there is no
+    nested wrapper key (unlike Payment which uses event['Payment']).
+    auditDetails carries the standard createdBy/createdTime/lastModifiedBy/
+    lastModifiedTime fields used for both audit columns and the ReplacingMergeTree
+    version key (last_modified_time).
+    """
+    audit = event.get('auditDetails', {}) or {}
+
+    return {
+        'tenant_id': event.get('tenantId', ''),
+        'assessmentnumber': event.get('assessmentNumber', ''),
+        'financialyear': event.get('financialYear', ''),
+        'propertyid': event.get('propertyId', ''),
+        'status': event.get('status', ''),
+        'source': event.get('source', ''),
+        'channel': event.get('channel', ''),
+        'assessmentdate': parse_ts(event.get('assessmentDate')) or EPOCH,
+        'additionaldetails': json.dumps(event.get('additionalDetails')) if event.get('additionalDetails') else '',
+        'created_by': audit.get('createdBy', ''),
+        'created_time': parse_ts(audit.get('createdTime')) or EPOCH,
+        'last_modified_by': audit.get('lastModifiedBy', ''),
+        'last_modified_time': parse_ts(audit.get('lastModifiedTime')) or EPOCH,
     }
 
 
@@ -1069,6 +1130,99 @@ def transform_load_bill_events(**context):
 
 # -- DAG definition -----------------------------------------------------------
 
+
+def extract_assessment_events(**context):
+    """Count assessment events and pass window metadata via XCom.
+
+    Only passes lightweight metadata (window timestamps + total count).
+    No raw data is loaded into memory or XCom.
+    """
+    window_start, window_end = get_window(context)
+    logger.info(f"Run type: {context['dag_run'].run_type}")
+    logger.info(f"Logical date: {context['logical_date']}")
+    logger.info(f"Assessment extract window: [{window_start}, {window_end})")
+
+    client = get_client()
+    try:
+        total_count = count_assessment_events(client, window_start, window_end)
+        logger.info(f"Assessment events found: {total_count}")
+
+        return {
+            'total_count': total_count,
+            'window_start': window_start.isoformat(),
+            'window_end': window_end.isoformat(),
+        }
+
+    finally:
+        client.close()
+
+
+def transform_load_assessment_events(**context):
+    """For each chunk: extract from ClickHouse -> transform -> load into silver table.
+
+    Each raw assessment event maps directly to one property_assessment_entity row.
+    The event payload is the assessment itself (no nested wrapper key).
+    Only one chunk (STREAM_BATCH_SIZE rows) of raw JSON is in memory at a time.
+    """
+    ti = context['ti']
+    metadata = ti.xcom_pull(task_ids='extract_assessment_events')
+
+    total_count = metadata['total_count']
+    if total_count == 0:
+        logger.info("No assessment events to process")
+        return {'assessments': 0}
+
+    ws = datetime.fromisoformat(metadata['window_start'])
+    we = datetime.fromisoformat(metadata['window_end'])
+
+    logger.info(f"Processing {total_count} assessment events in chunks of {STREAM_BATCH_SIZE}")
+
+    client = get_client()
+    try:
+        total_assessments = 0
+        offset = 0
+
+        while offset < total_count:
+            # -- EXTRACT: fetch one chunk from ClickHouse --
+            raw_jsons = fetch_assessment_events(client, ws, we,
+                                                limit=STREAM_BATCH_SIZE, offset=offset)
+            if not raw_jsons:
+                break
+
+            # -- TRANSFORM: parse JSON, extract fields --
+            assessment_rows = []
+
+            for raw_json in raw_jsons:
+                try:
+                    event = json.loads(raw_json)
+                except json.JSONDecodeError:
+                    logger.warning("Skipping invalid JSON")
+                    continue
+
+                if not event.get('assessmentNumber', ''):
+                    continue
+
+                assessment_rows.append(extract_assessment(event))
+
+            # -- LOAD: insert this chunk into silver table --
+            batch_insert(client, 'property_assessment_entity', assessment_rows, chunk_size=10000)
+
+            total_assessments += len(assessment_rows)
+            logger.info(
+                f"Chunk {offset}-{offset + len(raw_jsons)}: "
+                f"{len(assessment_rows)} assessments | Total: {total_assessments}"
+            )
+            offset += STREAM_BATCH_SIZE
+
+        logger.info(f"Assessment processing complete: {total_assessments} rows")
+        return {'assessments': total_assessments}
+
+    finally:
+        client.close()
+
+
+# -- DAG definition -----------------------------------------------------------
+
 with DAG(
     'property_tax_raw_to_silver',
     default_args=default_args,
@@ -1130,6 +1284,16 @@ with DAG(
         python_callable=transform_load_bill_events,
     )
 
+    # Assessment pipeline: Extract -> Transform+Load
+    extract_assessments = PythonOperator(
+        task_id='extract_assessment_events',
+        python_callable=extract_assessment_events,
+    )
+    transform_load_assessments = PythonOperator(
+        task_id='transform_load_assessment_events',
+        python_callable=transform_load_assessment_events,
+    )
+
     # Property pipeline
     start >> extract_props >> transform_load_props >> trigger_rmv_refresh
     # Demand pipeline (runs in parallel with property pipeline)
@@ -1138,5 +1302,7 @@ with DAG(
     start >> extract_payments >> transform_load_payments >> trigger_rmv_refresh
     # Bill pipeline (runs in parallel with all other pipelines)
     start >> extract_bills >> transform_load_bills >> trigger_rmv_refresh
+    # Assessment pipeline (runs in parallel with all other pipelines)
+    start >> extract_assessments >> transform_load_assessments >> trigger_rmv_refresh
     # Final
     trigger_rmv_refresh >> end
