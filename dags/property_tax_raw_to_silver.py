@@ -20,6 +20,11 @@ Architecture (Extract → Transform+Load per chunk):
         -> transform_load_demand_events  (per chunk: fetch → transform → insert)
             -> demand_with_details_entity
 
+  Payment pipeline (runs in parallel with Property and Demand pipelines):
+    extract_payment_events  (count + pass window metadata via XCom)
+        -> transform_load_payment_events  (per chunk: fetch → transform → insert)
+            -> payment_with_details_entity
+
   Extract passes only lightweight metadata (window + count) via XCom.
   Transform+Load reads from ClickHouse one chunk at a time, transforms it,
   inserts into silver tables, then moves to the next chunk.
@@ -249,6 +254,41 @@ def count_demand_events(client, window_start: datetime,
     return result.result_rows[0][0]
 
 
+def fetch_payment_events(client, window_start: datetime,
+                         window_end: datetime, limit: int = None,
+                         offset: int = 0) -> List[str]:
+    """Fetch raw JSON strings where event_time falls within
+    [window_start, window_end) with optional pagination."""
+    query = (
+        "SELECT raw FROM payment_events_raw "
+        "WHERE event_time >= {start:DateTime64(3)} "
+        "AND event_time < {end:DateTime64(3)} "
+        "ORDER BY event_time "
+    )
+
+    params = {'start': window_start, 'end': window_end}
+
+    if limit is not None:
+        query += "LIMIT {limit:UInt64} OFFSET {offset:UInt64}"
+        params['limit'] = limit
+        params['offset'] = offset
+
+    result = client.query(query, parameters=params)
+    return [r[0] for r in result.result_rows]
+
+
+def count_payment_events(client, window_start: datetime,
+                         window_end: datetime) -> int:
+    """Count total payment events in the time window."""
+    result = client.query(
+        "SELECT count() FROM payment_events_raw "
+        "WHERE event_time >= {start:DateTime64(3)} "
+        "AND event_time < {end:DateTime64(3)}",
+        parameters={'start': window_start, 'end': window_end},
+    )
+    return result.result_rows[0][0]
+
+
 # -- Extraction helpers -------------------------------------------------------
 
 
@@ -439,6 +479,55 @@ def extract_demand(event: dict, demand: dict) -> dict:
     }
 
 
+def extract_payment(event: dict, payment: dict) -> dict:
+    """Extract and flatten a single payment event into a row for payment_with_details_entity.
+
+    The raw event is expected to carry a top-level 'Payment' object whose
+    'paymentDetails' array contains one or more receipt records.  When
+    multiple paymentDetails exist we take the first one (index 0) for the
+    scalar receipt columns; all detail rows share the same payment-level
+    fields.
+    """
+    audit = payment.get('auditDetails', {}) or {}
+    details = payment.get('paymentDetails', []) or []
+
+    # Pick the first payment detail for receipt-level scalar columns.
+    # Downstream consumers that need all details should use the raw table.
+    detail = details[0] if details else {}
+    bill = detail.get('bill', {}) or {}
+
+    return {
+        'tenant_id': event.get('tenantId', ''),
+        'payment_id': payment.get('id', ''),
+        'total_due': safe_dec(payment.get('totalDue'), 2),
+        'total_amount_paid': safe_dec(payment.get('totalAmountPaid'), 2),
+        'transaction_number': payment.get('transactionNumber', ''),
+        'transaction_date': parse_ts(payment.get('transactionDate')) or EPOCH,
+        'payment_mode': payment.get('paymentMode', ''),
+        'instrument_date': parse_ts(payment.get('instrumentDate')) or EPOCH,
+        'instrument_number': payment.get('instrumentNumber', ''),
+        'instrument_status': payment.get('instrumentStatus', ''),
+        'ifsc_code': payment.get('ifscCode', ''),
+        'additional_details': json.dumps(payment.get('additionalDetails')) if payment.get('additionalDetails') else '',
+        'payer_id': payment.get('payerId', ''),
+        'payment_status': payment.get('paymentStatus', ''),
+        'created_by': audit.get('createdBy', ''),
+        'created_time': parse_ts(audit.get('createdTime')) or EPOCH,
+        'last_modified_by': audit.get('lastModifiedBy', ''),
+        'last_modified_time': parse_ts(audit.get('lastModifiedTime')) or EPOCH,
+        'financial_year': payment.get('financialYear', ''),
+        'filestore_id': payment.get('filestoreId', ''),
+        # Payment detail / receipt fields (from first paymentDetail entry)
+        'receiptnumber': detail.get('receiptNumber', ''),
+        'receiptdate': parse_ts(detail.get('receiptDate')) or EPOCH,
+        'receipttype': detail.get('receiptType', ''),
+        'businessservice': detail.get('businessService', ''),
+        'billid': bill.get('id', ''),
+        'manualreceiptnumber': detail.get('manualReceiptNumber', ''),
+        'manualreceiptdate': parse_ts(detail.get('manualReceiptDate')) or EPOCH,
+    }
+
+
 # -- Extract task functions ----------------------------------------------------
 
 
@@ -483,6 +572,32 @@ def extract_demand_events(**context):
     try:
         total_count = count_demand_events(client, window_start, window_end)
         logger.info(f"Demand events found: {total_count}")
+
+        return {
+            'total_count': total_count,
+            'window_start': window_start.isoformat(),
+            'window_end': window_end.isoformat(),
+        }
+
+    finally:
+        client.close()
+
+
+def extract_payment_events(**context):
+    """Count payment events and pass window metadata via XCom.
+
+    Only passes lightweight metadata (window timestamps + total count).
+    No raw data is loaded into memory or XCom.
+    """
+    window_start, window_end = get_window(context)
+    logger.info(f"Run type: {context['dag_run'].run_type}")
+    logger.info(f"Logical date: {context['logical_date']}")
+    logger.info(f"Payment extract window: [{window_start}, {window_end})")
+
+    client = get_client()
+    try:
+        total_count = count_payment_events(client, window_start, window_end)
+        logger.info(f"Payment events found: {total_count}")
 
         return {
             'total_count': total_count,
@@ -641,6 +756,68 @@ def transform_load_demand_events(**context):
         client.close()
 
 
+def transform_load_payment_events(**context):
+    """For each chunk: extract from ClickHouse → transform → load into silver table.
+
+    Only one chunk (STREAM_BATCH_SIZE rows) of raw JSON is in memory at a time.
+    Each chunk is transformed and inserted before the next chunk is fetched.
+    No data accumulation, no XCom bloat.
+    """
+    ti = context['ti']
+    metadata = ti.xcom_pull(task_ids='extract_payment_events')
+
+    total_count = metadata['total_count']
+    if total_count == 0:
+        logger.info("No payment events to process")
+        return {'payments': 0}
+
+    ws = datetime.fromisoformat(metadata['window_start'])
+    we = datetime.fromisoformat(metadata['window_end'])
+
+    logger.info(f"Processing {total_count} payment events in chunks of {STREAM_BATCH_SIZE}")
+
+    client = get_client()
+    try:
+        total_payments = 0
+        offset = 0
+
+        while offset < total_count:
+            # -- EXTRACT: fetch one chunk from ClickHouse --
+            raw_jsons = fetch_payment_events(client, ws, we,
+                                             limit=STREAM_BATCH_SIZE, offset=offset)
+            if not raw_jsons:
+                break
+
+            # -- TRANSFORM: parse JSON, extract fields --
+            payment_rows = []
+
+            for raw_json in raw_jsons:
+                try:
+                    event = json.loads(raw_json)
+                except json.JSONDecodeError:
+                    logger.warning("Skipping invalid JSON")
+                    continue
+
+                payment = event.get('Payment', {}) or {}
+                if not payment.get('id', ''):
+                    continue
+
+                payment_rows.append(extract_payment(event, payment))
+
+            # -- LOAD: insert this chunk into silver table --
+            batch_insert(client, 'payment_with_details_entity', payment_rows, chunk_size=10000)
+
+            total_payments += len(payment_rows)
+            logger.info(f"Chunk {offset}-{offset + len(raw_jsons)}: {len(payment_rows)} payments | Total: {total_payments}")
+            offset += STREAM_BATCH_SIZE
+
+        logger.info(f"Payment processing complete: {total_payments} rows")
+        return {'payments': total_payments}
+
+    finally:
+        client.close()
+
+
 # -- DAG definition -----------------------------------------------------------
 
 with DAG(
@@ -684,9 +861,21 @@ with DAG(
 
     end = EmptyOperator(task_id='end')
 
+    # Payment pipeline: Extract -> Transform+Load
+    extract_payments = PythonOperator(
+        task_id='extract_payment_events',
+        python_callable=extract_payment_events,
+    )
+    transform_load_payments = PythonOperator(
+        task_id='transform_load_payment_events',
+        python_callable=transform_load_payment_events,
+    )
+
     # Property pipeline
     start >> extract_props >> transform_load_props >> trigger_rmv_refresh
     # Demand pipeline (runs in parallel with property pipeline)
     start >> extract_demands >> transform_load_demands >> trigger_rmv_refresh
+    # Payment pipeline (runs in parallel with property and demand pipelines)
+    start >> extract_payments >> transform_load_payments >> trigger_rmv_refresh
     # Final
     trigger_rmv_refresh >> end
