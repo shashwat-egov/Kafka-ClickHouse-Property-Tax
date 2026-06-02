@@ -25,6 +25,18 @@ Architecture (Extract → Transform+Load per chunk):
         -> transform_load_payment_events  (per chunk: fetch → transform → insert)
             -> payment_with_details_entity
 
+  Bill pipeline (runs in parallel with all other pipelines):
+    extract_bill_events  (count + pass window metadata via XCom)
+        -> transform_load_bill_events  (per chunk: fetch → transform → insert)
+            -> bill_entity               (one row per bill)
+            -> bill_detail_entity        (one row per billDetail entry)
+
+  Bill pipeline (runs in parallel with all other pipelines):
+    extract_bill_events  (count + pass window metadata via XCom)
+        -> transform_load_bill_events  (per chunk: fetch → transform → insert)
+            -> bill_entity               (one row per bill)
+            -> bill_detail_entity        (one row per billDetail inside each bill)
+
   Extract passes only lightweight metadata (window + count) via XCom.
   Transform+Load reads from ClickHouse one chunk at a time, transforms it,
   inserts into silver tables, then moves to the next chunk.
@@ -289,6 +301,41 @@ def count_payment_events(client, window_start: datetime,
     return result.result_rows[0][0]
 
 
+def fetch_bill_events(client, window_start: datetime,
+                      window_end: datetime, limit: int = None,
+                      offset: int = 0) -> List[str]:
+    """Fetch raw JSON strings where event_time falls within
+    [window_start, window_end) with optional pagination."""
+    query = (
+        "SELECT raw FROM bill_events_raw "
+        "WHERE event_time >= {start:DateTime64(3)} "
+        "AND event_time < {end:DateTime64(3)} "
+        "ORDER BY event_time "
+    )
+
+    params = {'start': window_start, 'end': window_end}
+
+    if limit is not None:
+        query += "LIMIT {limit:UInt64} OFFSET {offset:UInt64}"
+        params['limit'] = limit
+        params['offset'] = offset
+
+    result = client.query(query, parameters=params)
+    return [r[0] for r in result.result_rows]
+
+
+def count_bill_events(client, window_start: datetime,
+                      window_end: datetime) -> int:
+    """Count total bill events in the time window."""
+    result = client.query(
+        "SELECT count() FROM bill_events_raw "
+        "WHERE event_time >= {start:DateTime64(3)} "
+        "AND event_time < {end:DateTime64(3)}",
+        parameters={'start': window_start, 'end': window_end},
+    )
+    return result.result_rows[0][0]
+
+
 # -- Extraction helpers -------------------------------------------------------
 
 
@@ -477,6 +524,101 @@ def extract_demand(event: dict, demand: dict) -> dict:
         'last_modified_by': audit.get('lastModifiedBy', ''),
         'last_modified_time': parse_ts(audit.get('lastModifiedTime')) or EPOCH,
     }
+
+
+
+def extract_bill(event: dict, bill: dict) -> dict:
+    """Extract top-level bill fields into a row for bill_entity.
+
+    The raw event carries a list of bills under the key 'bills'.
+    This function handles one bill at a time; callers loop over the list.
+    financial_year is derived from billDetails[0].fromPeriod when not
+    set explicitly on the bill itself.
+    """
+    audit = bill.get('auditDetails', {}) or {}
+    details = bill.get('billDetails', []) or []
+
+    # Derive financial year from the first billDetail's fromPeriod when absent
+    explicit_fy = bill.get('financialYear', '')
+    if not explicit_fy and details:
+        explicit_fy = compute_financial_year(details[0].get('fromPeriod'))
+
+    # collectionModesNotAllowed is a list in the POJO -> store as CSV string
+    modes_not_allowed = bill.get('collectionModesNotAllowed', []) or []
+    if isinstance(modes_not_allowed, list):
+        modes_not_allowed = ','.join(str(m) for m in modes_not_allowed)
+
+    return {
+        'tenant_id': event.get('tenantId', ''),
+        'bill_id': bill.get('id', ''),
+        'status': bill.get('status', ''),
+        'iscancelled': 1 if bill.get('isCancelled', False) else 0,
+        'additionaldetails': json.dumps(bill.get('additionalDetails')) if bill.get('additionalDetails') else '',
+        'collectionmodesnotallowed': modes_not_allowed,
+        'partpaymentallowed': 1 if bill.get('partPaymentAllowed', False) else 0,
+        'isadvanceallowed': 1 if bill.get('isAdvanceAllowed', False) else 0,
+        'minimumamounttobepaid': safe_dec(bill.get('minimumAmountToBePaid'), 2),
+        'businessservice': bill.get('businessService', ''),
+        'totalamount': safe_dec(bill.get('totalAmount'), 2),
+        'consumercode': bill.get('consumerCode', ''),
+        'billnumber': bill.get('billNumber', ''),
+        'billdate': parse_ts(bill.get('billDate')) or EPOCH,
+        'reasonforcancellation': bill.get('reasonForCancellation', ''),
+        'created_by': audit.get('createdBy', ''),
+        'created_time': parse_ts(audit.get('createdTime')) or EPOCH,
+        'last_modified_by': audit.get('lastModifiedBy', ''),
+        'last_modified_time': parse_ts(audit.get('lastModifiedTime')) or EPOCH,
+        'financial_year': explicit_fy,
+    }
+
+
+def extract_bill_details(event: dict, bill: dict) -> List[dict]:
+    """Expand billDetails array into rows for bill_detail_entity.
+
+    Each billDetail becomes one row.  Audit fields are inherited from the
+    parent bill's auditDetails since billDetails don't carry their own.
+    financial_year is computed from fromPeriod / toPeriod.
+    """
+    tenant_id = event.get('tenantId', '')
+    bill_id = bill.get('id', '')
+    audit = bill.get('auditDetails', {}) or {}
+
+    rows = []
+    for detail in (bill.get('billDetails', []) or []):
+        detail_id = detail.get('id', '')
+        if not detail_id:
+            continue
+
+        from_period = safe_int(detail.get('fromPeriod', 0))
+        to_period = safe_int(detail.get('toPeriod', 0))
+        fy = compute_financial_year(from_period) if from_period else ''
+
+        rows.append({
+            'id': detail_id,
+            'tenant_id': tenant_id,
+            'demand_id': detail.get('demandId', ''),
+            'bill_id': bill_id,
+            'amount': safe_dec(detail.get('amount'), 2),
+            'amount_paid': safe_dec(detail.get('amountPaid'), 2),
+            'from_period': from_period,
+            'to_period': to_period,
+            'additional_details': json.dumps(detail.get('additionalDetails')) if detail.get('additionalDetails') else '',
+            'channel': detail.get('channel', ''),
+            'voucher_header': detail.get('voucherHeader', ''),
+            'boundary': detail.get('boundary', ''),
+            'collection_type': detail.get('collectionType', ''),
+            'bill_description': detail.get('billDescription', ''),
+            'expiry_date': str(detail.get('expiryDate', '')) if detail.get('expiryDate') is not None else '',
+            'display_message': detail.get('displayMessage', ''),
+            'call_back_for_apportioning': detail.get('callBackForApportioning', ''),
+            'cancellation_remarks': detail.get('cancellationRemarks', ''),
+            'created_by': audit.get('createdBy', ''),
+            'created_time': parse_ts(audit.get('createdTime')) or EPOCH,
+            'last_modified_by': audit.get('lastModifiedBy', ''),
+            'last_modified_time': parse_ts(audit.get('lastModifiedTime')) or EPOCH,
+            'financial_year': fy,
+        })
+    return rows
 
 
 def extract_payment(event: dict, payment: dict) -> dict:
@@ -818,6 +960,113 @@ def transform_load_payment_events(**context):
         client.close()
 
 
+def extract_bill_events(**context):
+    """Count bill events and pass window metadata via XCom.
+
+    Only passes lightweight metadata (window timestamps + total count).
+    No raw data is loaded into memory or XCom.
+    """
+    window_start, window_end = get_window(context)
+    logger.info(f"Run type: {context['dag_run'].run_type}")
+    logger.info(f"Logical date: {context['logical_date']}")
+    logger.info(f"Bill extract window: [{window_start}, {window_end})")
+
+    client = get_client()
+    try:
+        total_count = count_bill_events(client, window_start, window_end)
+        logger.info(f"Bill events found: {total_count}")
+
+        return {
+            'total_count': total_count,
+            'window_start': window_start.isoformat(),
+            'window_end': window_end.isoformat(),
+        }
+
+    finally:
+        client.close()
+
+
+def transform_load_bill_events(**context):
+    """For each chunk: extract from ClickHouse -> transform -> load into silver tables.
+
+    Each raw bill event carries a list of bills under the 'bills' key.
+    For every bill we write to two silver tables:
+      - bill_entity               (one row per bill)
+      - bill_detail_entity        (one row per billDetail)
+
+    Only one chunk (STREAM_BATCH_SIZE rows) of raw JSON is in memory at a time.
+    """
+    ti = context['ti']
+    metadata = ti.xcom_pull(task_ids='extract_bill_events')
+
+    total_count = metadata['total_count']
+    if total_count == 0:
+        logger.info("No bill events to process")
+        return {'bills': 0, 'bill_details': 0}
+
+    ws = datetime.fromisoformat(metadata['window_start'])
+    we = datetime.fromisoformat(metadata['window_end'])
+
+    logger.info(f"Processing {total_count} bill events in chunks of {STREAM_BATCH_SIZE}")
+
+    client = get_client()
+    try:
+        total_bills = 0
+        total_details = 0
+        offset = 0
+
+        while offset < total_count:
+            # -- EXTRACT: fetch one chunk from ClickHouse --
+            raw_jsons = fetch_bill_events(client, ws, we,
+                                          limit=STREAM_BATCH_SIZE, offset=offset)
+            if not raw_jsons:
+                break
+
+            # -- TRANSFORM: parse JSON, extract fields --
+            bill_rows = []
+            detail_rows = []
+
+            for raw_json in raw_jsons:
+                try:
+                    event = json.loads(raw_json)
+                except json.JSONDecodeError:
+                    logger.warning("Skipping invalid JSON")
+                    continue
+
+                # bills is a list per the POJO: private List<Bill> bills
+                bills = event.get('bills', []) or []
+                for bill in bills:
+                    if not bill.get('id', ''):
+                        continue
+
+                    bill_rows.append(extract_bill(event, bill))
+                    detail_rows.extend(extract_bill_details(event, bill))
+
+            # -- LOAD: insert this chunk into silver tables --
+            batch_insert(client, 'bill_entity', bill_rows, chunk_size=10000)
+            batch_insert(client, 'bill_detail_entity', detail_rows, chunk_size=10000)
+
+            total_bills += len(bill_rows)
+            total_details += len(detail_rows)
+
+            logger.info(
+                f"Chunk {offset}-{offset + len(raw_jsons)}: "
+                f"{len(bill_rows)} bills, {len(detail_rows)} details | "
+                f"Total: {total_bills}/{total_details}"
+            )
+            offset += STREAM_BATCH_SIZE
+
+        counts = {
+            'bills': total_bills,
+            'bill_details': total_details,
+        }
+        logger.info(f"Bill processing complete: {counts}")
+        return counts
+
+    finally:
+        client.close()
+
+
 # -- DAG definition -----------------------------------------------------------
 
 with DAG(
@@ -871,11 +1120,23 @@ with DAG(
         python_callable=transform_load_payment_events,
     )
 
+    # Bill pipeline: Extract -> Transform+Load
+    extract_bills = PythonOperator(
+        task_id='extract_bill_events',
+        python_callable=extract_bill_events,
+    )
+    transform_load_bills = PythonOperator(
+        task_id='transform_load_bill_events',
+        python_callable=transform_load_bill_events,
+    )
+
     # Property pipeline
     start >> extract_props >> transform_load_props >> trigger_rmv_refresh
     # Demand pipeline (runs in parallel with property pipeline)
     start >> extract_demands >> transform_load_demands >> trigger_rmv_refresh
     # Payment pipeline (runs in parallel with property and demand pipelines)
     start >> extract_payments >> transform_load_payments >> trigger_rmv_refresh
+    # Bill pipeline (runs in parallel with all other pipelines)
+    start >> extract_bills >> transform_load_bills >> trigger_rmv_refresh
     # Final
     trigger_rmv_refresh >> end
