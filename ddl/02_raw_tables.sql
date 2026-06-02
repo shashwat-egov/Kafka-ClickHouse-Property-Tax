@@ -37,3 +37,48 @@ ENGINE = MergeTree
 PARTITION BY toYYYYMM(event_time)
 ORDER BY event_time
 SETTINGS index_granularity = 8192;
+
+
+-- ############################################################################
+-- BILL EVENTS RAW
+-- ############################################################################
+
+CREATE TABLE IF NOT EXISTS replacing_test.bill_events_raw
+(
+    event_time DateTime64(3) DEFAULT now64(3),
+    raw String
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(event_time)
+ORDER BY event_time
+SETTINGS index_granularity = 8192;
+
+
+-- ############################################################################
+-- PAYMENT EVENTS RAW
+-- ############################################################################
+
+CREATE TABLE IF NOT EXISTS replacing_test.payment_events_raw
+(
+    event_time DateTime64(3) DEFAULT now64(3),
+    raw String
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(event_time)
+ORDER BY event_time
+SETTINGS index_granularity = 8192;
+
+
+-- ############################################################################
+-- ASSESSMENT EVENTS RAW
+-- ############################################################################
+
+CREATE TABLE IF NOT EXISTS replacing_test.assessment_events_raw
+(
+    event_time DateTime64(3) DEFAULT now64(3),
+    raw String
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(event_time)
+ORDER BY event_time
+SETTINGS index_granularity = 8192;

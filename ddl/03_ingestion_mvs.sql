@@ -22,3 +22,27 @@ TO replacing_test.demand_events_raw
 AS
 SELECT raw
 FROM replacing_test.kafka_demand_events;
+
+
+-- Bill Events: Kafka → bill_events_raw
+CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.mv_bill_events_raw
+TO replacing_test.bill_events_raw
+AS
+SELECT raw
+FROM replacing_test.kafka_bill_events;
+
+
+-- Payment Events: Kafka → payment_events_raw
+CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.mv_payment_events_raw
+TO replacing_test.payment_events_raw
+AS
+SELECT raw
+FROM replacing_test.kafka_payment_events;
+
+
+-- Assessment Events: Kafka → assessment_events_raw
+CREATE MATERIALIZED VIEW IF NOT EXISTS replacing_test.mv_assessment_events_raw
+TO replacing_test.assessment_events_raw
+AS
+SELECT raw
+FROM replacing_test.kafka_assessment_events;
