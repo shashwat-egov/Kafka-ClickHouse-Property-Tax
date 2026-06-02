@@ -14,6 +14,7 @@ Architecture (Extract → Transform+Load per chunk):
             -> property_address_entity
             -> property_unit_entity
             -> property_owner_entity
+            -> property_audit_entity     (MergeTree; one audit row per event, not replacing)
 
   Demand pipeline:
     extract_demand_events  (count + pass window metadata via XCom)
@@ -703,7 +704,34 @@ def extract_payment(event: dict, payment: dict) -> dict:
     }
 
 
-def extract_assessment(event: dict) -> dict:
+def extract_property_audit(event: dict, prop: dict) -> dict:
+    """Snapshot the current property state into property_audit_entity.
+
+    Uses plain MergeTree (no ReplacingMergeTree) — every ingest intentionally
+    creates a new audit record for change-history tracking.
+    audit_created_time is left to ClickHouse DEFAULT now64(3).
+    """
+    audit = prop.get('auditDetails', {}) or {}
+    owners = prop.get('owners', []) or []
+
+    return {
+        'tenant_id': event.get('tenantId', ''),
+        'property_id': prop.get('propertyId', ''),
+        'property_type': prop.get('propertyType', ''),
+        'ownership_category': prop.get('ownershipCategory', ''),
+        'usage_category': prop.get('usageCategory', ''),
+        'property_status': prop.get('status', ''),
+        'workflow_state': prop.get('workflowCode', ''),
+        'super_built_up_area': safe_dec(prop.get('superBuiltUpArea'), 2),
+        'built_up_area': safe_dec(prop.get('builtUpArea'), 2),
+        'land_area': safe_dec(prop.get('landArea'), 2),
+        'owner_count': safe_int(len(owners)),
+        'created_time': parse_ts(audit.get('createdTime')) or EPOCH,
+        'last_modified_time': parse_ts(audit.get('lastModifiedTime')) or EPOCH,
+    }
+
+
+
     """Map a raw assessment event to a property_assessment_entity row.
 
     The assessment payload is the top-level event itself — there is no
@@ -828,7 +856,7 @@ def transform_load_property_events(**context):
     total_count = metadata['total_count']
     if total_count == 0:
         logger.info("No property events to process")
-        return {'properties': 0, 'units': 0, 'owners': 0}
+        return {'properties': 0, 'units': 0, 'owners': 0, 'audits': 0}
 
     ws = datetime.fromisoformat(metadata['window_start'])
     we = datetime.fromisoformat(metadata['window_end'])
@@ -840,6 +868,7 @@ def transform_load_property_events(**context):
         total_props = 0
         total_units = 0
         total_owners = 0
+        total_audits = 0
         offset = 0
 
         while offset < total_count:
@@ -853,6 +882,7 @@ def transform_load_property_events(**context):
             prop_rows = []
             unit_rows = []
             owner_rows = []
+            audit_rows = []
 
             for raw_json in raw_jsons:
                 try:
@@ -868,20 +898,23 @@ def transform_load_property_events(**context):
                 prop_rows.append(extract_property_address(event, prop))
                 unit_rows.extend(extract_units(event, prop))
                 owner_rows.extend(extract_owners(event, prop))
+                audit_rows.append(extract_property_audit(event, prop))
 
             # -- LOAD: insert this chunk into silver tables --
             batch_insert(client, 'property_address_entity', prop_rows, chunk_size=10000)
             batch_insert(client, 'property_unit_entity', unit_rows, chunk_size=10000)
             batch_insert(client, 'property_owner_entity', owner_rows, chunk_size=10000)
+            batch_insert(client, 'property_audit_entity', audit_rows, chunk_size=10000)
 
             total_props += len(prop_rows)
             total_units += len(unit_rows)
             total_owners += len(owner_rows)
+            total_audits += len(audit_rows)
 
             logger.info(
                 f"Chunk {offset}-{offset + len(raw_jsons)}: "
-                f"{len(prop_rows)} props, {len(unit_rows)} units, {len(owner_rows)} owners | "
-                f"Total: {total_props}/{total_units}/{total_owners}"
+                f"{len(prop_rows)} props, {len(unit_rows)} units, {len(owner_rows)} owners, {len(audit_rows)} audits | "
+                f"Total: {total_props}/{total_units}/{total_owners}/{total_audits}"
             )
             offset += STREAM_BATCH_SIZE
 
@@ -889,6 +922,7 @@ def transform_load_property_events(**context):
             'properties': total_props,
             'units': total_units,
             'owners': total_owners,
+            'audits': total_audits,
         }
         logger.info(f"Property processing complete: {counts}")
         return counts
