@@ -1295,14 +1295,21 @@ with DAG(
     )
 
     # Property pipeline
-    start >> extract_props >> transform_load_props >> trigger_rmv_refresh
-    # Demand pipeline (runs in parallel with property pipeline)
-    start >> extract_demands >> transform_load_demands >> trigger_rmv_refresh
-    # Payment pipeline (runs in parallel with property and demand pipelines)
-    start >> extract_payments >> transform_load_payments >> trigger_rmv_refresh
-    # Bill pipeline (runs in parallel with all other pipelines)
-    start >> extract_bills >> transform_load_bills >> trigger_rmv_refresh
-    # Assessment pipeline (runs in parallel with all other pipelines)
-    start >> extract_assessments >> transform_load_assessments >> trigger_rmv_refresh
-    # Final
-    trigger_rmv_refresh >> end
+    start >> extract_props >> transform_load_props
+    # Demand pipeline (runs in parallel)
+    start >> extract_demands >> transform_load_demands
+    # Payment pipeline (runs in parallel)
+    start >> extract_payments >> transform_load_payments
+    # Bill pipeline (runs in parallel)
+    start >> extract_bills >> transform_load_bills
+    # Assessment pipeline (runs in parallel)
+    start >> extract_assessments >> transform_load_assessments
+
+    # Fan-in: all pipelines must complete before triggering downstream refresh
+    [
+        transform_load_props,
+        transform_load_demands,
+        transform_load_payments,
+        transform_load_bills,
+        transform_load_assessments,
+    ] >> trigger_rmv_refresh >> end
