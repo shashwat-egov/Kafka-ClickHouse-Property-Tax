@@ -401,6 +401,7 @@ def extract_property_address(event: dict, prop: dict) -> dict:
         'created_time': parse_ts(audit.get('createdTime')) or EPOCH,
         'last_modified_by': audit.get('lastModifiedBy', ''),
         'last_modified_time': parse_ts(audit.get('lastModifiedTime')) or EPOCH,
+        'financial_year': prop.get('financialYear', ''),
         'additionaldetails': json.dumps(prop.get('additionalDetails')) if prop.get('additionalDetails') else '',
         'door_no': addr.get('doorNo', ''),
         'plot_no': addr.get('plotNo', ''),
@@ -506,7 +507,8 @@ def extract_demand(event: dict, demand: dict) -> dict:
     audit = demand.get('auditDetails', {}) or {}
     details = demand.get('demandDetails', []) or []
 
-    tax_totals: Dict[str, Decimal] = {}
+    tax_amounts: Dict[str, Decimal] = {}
+    collection_amounts: Dict[str, Decimal] = {}
     total_tax = Decimal('0')
     total_collection = Decimal('0')
 
@@ -516,7 +518,8 @@ def extract_demand(event: dict, demand: dict) -> dict:
             continue
         ta = safe_dec(d.get('taxAmount'), 4)
         ca = safe_dec(d.get('collectionAmount'), 4)
-        tax_totals[code] = tax_totals.get(code, Decimal('0')) + ta
+        tax_amounts[code] = tax_amounts.get(code, Decimal('0')) + ta
+        collection_amounts[code] = collection_amounts.get(code, Decimal('0')) + ca
         total_tax += ta
         total_collection += ca
 
@@ -524,7 +527,6 @@ def extract_demand(event: dict, demand: dict) -> dict:
     fy = explicit_fy if explicit_fy else compute_financial_year(
         demand.get('taxPeriodFrom'))
 
-    # Calculate outstanding_amount and is_paid
     outstanding_amount = round(total_tax - total_collection, 2)
     is_paid = 1 if outstanding_amount <= 0 else 0
 
@@ -538,19 +540,43 @@ def extract_demand(event: dict, demand: dict) -> dict:
         'tax_period_from': parse_ts(demand.get('taxPeriodFrom')) or EPOCH,
         'tax_period_to': parse_ts(demand.get('taxPeriodTo')) or EPOCH,
         'demand_status': demand.get('status', ''),
-        'is_payment_completed': 1 if demand.get('isPaymentCompleted', False) else 0,
         'financial_year': fy,
         'minimum_amount_payable': safe_dec(demand.get('minimumAmountPayable'), 4),
         'bill_expiry_time': safe_int(demand.get('billExpiryTime', 0)),
         'fixed_bill_expiry_date': safe_int(demand.get('fixedBillExpiryDate', 0)),
         'total_tax_amount': round(total_tax, 2),
         'total_collection_amount': round(total_collection, 2),
-        'pt_tax': safe_dec(tax_totals.get('PT_TAX', 0), 4),
-        'pt_cancer_cess': safe_dec(tax_totals.get('PT_CANCER_CESS', 0), 4),
-        'pt_fire_cess': safe_dec(tax_totals.get('PT_FIRE_CESS', 0), 4),
-        'pt_roundoff': safe_dec(tax_totals.get('PT_ROUNDOFF', 0), 4),
-        'pt_owner_exemption': safe_dec(tax_totals.get('PT_OWNER_EXEMPTION', 0), 4),
-        'pt_unit_usage_exemption': safe_dec(tax_totals.get('PT_UNIT_USAGE_EXEMPTION', 0), 4),
+        # Tax amounts by tax head
+        'pt_tax': safe_dec(tax_amounts.get('PT_TAX', 0), 4),
+        'pt_cancer_cess': safe_dec(tax_amounts.get('PT_CANCER_CESS', 0), 4),
+        'pt_fire_cess': safe_dec(tax_amounts.get('PT_FIRE_CESS', 0), 4),
+        'pt_roundoff': safe_dec(tax_amounts.get('PT_ROUNDOFF', 0), 4),
+        'pt_owner_exemption': safe_dec(tax_amounts.get('PT_OWNER_EXEMPTION', 0), 4),
+        'pt_unit_usage_exemption': safe_dec(tax_amounts.get('PT_UNIT_USAGE_EXEMPTION', 0), 4),
+        'pt_advance_carryforward': safe_dec(tax_amounts.get('PT_ADVANCE_CARRYFORWARD', 0), 4),
+        'pt_decimal_ceiling_debit': safe_dec(tax_amounts.get('PT_DECIMAL_CEILING_DEBIT', 0), 4),
+        'pt_time_rebate': safe_dec(tax_amounts.get('PT_TIME_REBATE', 0), 4),
+        'pt_decimal_ceiling_credit': safe_dec(tax_amounts.get('PT_DECIMAL_CEILING_CREDIT', 0), 4),
+        'pt_time_penalty': safe_dec(tax_amounts.get('PT_TIME_PENALTY', 0), 4),
+        'pt_adhoc_penalty': safe_dec(tax_amounts.get('PT_ADHOC_PENALTY', 0), 4),
+        'pt_adhoc_rebate': safe_dec(tax_amounts.get('PT_ADHOC_REBATE', 0), 4),
+        'pt_time_interest': safe_dec(tax_amounts.get('PT_TIME_INTEREST', 0), 4),
+        # Collection amounts by tax head
+        'pt_tax_collection': safe_dec(collection_amounts.get('PT_TAX', 0), 4),
+        'pt_cancer_cess_collection': safe_dec(collection_amounts.get('PT_CANCER_CESS', 0), 4),
+        'pt_fire_cess_collection': safe_dec(collection_amounts.get('PT_FIRE_CESS', 0), 4),
+        'pt_roundoff_collection': safe_dec(collection_amounts.get('PT_ROUNDOFF', 0), 4),
+        'pt_owner_exemption_collection': safe_dec(collection_amounts.get('PT_OWNER_EXEMPTION', 0), 4),
+        'pt_unit_usage_exemption_collection': safe_dec(collection_amounts.get('PT_UNIT_USAGE_EXEMPTION', 0), 4),
+        'pt_advance_carryforward_collection': safe_dec(collection_amounts.get('PT_ADVANCE_CARRYFORWARD', 0), 4),
+        'pt_decimal_ceiling_debit_collection': safe_dec(collection_amounts.get('PT_DECIMAL_CEILING_DEBIT', 0), 4),
+        'pt_time_rebate_collection': safe_dec(collection_amounts.get('PT_TIME_REBATE', 0), 4),
+        'pt_decimal_ceiling_credit_collection': safe_dec(collection_amounts.get('PT_DECIMAL_CEILING_CREDIT', 0), 4),
+        'pt_time_penalty_collection': safe_dec(collection_amounts.get('PT_TIME_PENALTY', 0), 4),
+        'pt_adhoc_penalty_collection': safe_dec(collection_amounts.get('PT_ADHOC_PENALTY', 0), 4),
+        'pt_adhoc_rebate_collection': safe_dec(collection_amounts.get('PT_ADHOC_REBATE', 0), 4),
+        'pt_time_interest_collection': safe_dec(collection_amounts.get('PT_TIME_INTEREST', 0), 4),
+        # Derived
         'outstanding_amount': outstanding_amount,
         'is_paid': is_paid,
         'created_by': audit.get('createdBy', ''),
@@ -732,6 +758,7 @@ def extract_property_audit(event: dict, prop: dict) -> dict:
 
 
 
+def extract_assessment(event: dict) -> dict:
     """Map a raw assessment event to a property_assessment_entity row.
 
     The assessment payload is the top-level event itself — there is no
