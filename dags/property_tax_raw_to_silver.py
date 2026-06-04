@@ -66,11 +66,11 @@ logger = logging.getLogger(__name__)
 
 # -- Configuration -----------------------------------------------------------
 
-CLICKHOUSE_HOST = os.getenv('CLICKHOUSE_HOST', 'clickstack-clickhouse.clickhouse.svc.cluster.local')
+CLICKHOUSE_HOST = os.getenv('CLICKHOUSE_HOST', 'localhost')
 CLICKHOUSE_PORT = int(os.getenv('CLICKHOUSE_PORT', '8123'))
 CLICKHOUSE_USER = os.getenv('CLICKHOUSE_USER', 'default')
 CLICKHOUSE_PASSWORD = os.getenv('CLICKHOUSE_PASSWORD', '')
-CLICKHOUSE_DB = os.getenv('CLICKHOUSE_DB', 'airflow_test')
+CLICKHOUSE_DB = os.getenv('CLICKHOUSE_DB', 'kafka-events')
 
 # Streaming configuration for large datasets
 STREAM_BATCH_SIZE = 10000  # Process records in batches of 50k
@@ -376,12 +376,12 @@ def count_assessment_events(client, window_start: datetime,
 EPOCH = make_aware(datetime(1970, 1, 1))
 
 
-def extract_property_address(event: dict, prop: dict) -> dict:
+def extract_property_address(prop: dict) -> dict:
     audit = prop.get('auditDetails', {}) or {}
     addr = prop.get('address', {}) or {}
     return {
         'id': prop.get('id', ''),
-        'tenant_id': event.get('tenantId', ''),
+        'tenant_id': prop.get('tenantId', ''),
         'property_id': prop.get('propertyId', ''),
         'survey_id': prop.get('surveyId', ''),
         'account_id': prop.get('accountId', ''),
@@ -420,8 +420,8 @@ def extract_property_address(event: dict, prop: dict) -> dict:
     }
 
 
-def extract_units(event: dict, prop: dict) -> List[dict]:
-    tenant_id = event.get('tenantId', '')
+def extract_units(prop: dict) -> List[dict]:
+    tenant_id = prop.get('tenantId', '')
     property_uuid = prop.get('id', '')
     property_id = prop.get('propertyId', '')
     rows = []
@@ -460,8 +460,8 @@ def extract_units(event: dict, prop: dict) -> List[dict]:
     return rows
 
 
-def extract_owners(event: dict, prop: dict) -> List[dict]:
-    tenant_id = event.get('tenantId', '')
+def extract_owners(prop: dict) -> List[dict]:
+    tenant_id = prop.get('tenantId', '')
     property_uuid = prop.get('id', '')
     property_id = prop.get('propertyId', '')
     rows = []
@@ -503,7 +503,7 @@ def compute_financial_year(tax_period_from_ms) -> str:
     return f"{dt.year - 1}-{dt.year % 100:02d}"
 
 
-def extract_demand(event: dict, demand: dict) -> dict:
+def extract_demand(demand: dict) -> dict:
     audit = demand.get('auditDetails', {}) or {}
     details = demand.get('demandDetails', []) or []
 
@@ -531,7 +531,7 @@ def extract_demand(event: dict, demand: dict) -> dict:
     is_paid = 1 if outstanding_amount <= 0 else 0
 
     return {
-        'tenant_id': event.get('tenantId', ''),
+        'tenant_id': demand.get('tenantId', ''),
         'demand_id': demand.get('id', ''),
         'consumer_code': demand.get('consumerCode', ''),
         'consumer_type': demand.get('consumerType', ''),
@@ -587,7 +587,7 @@ def extract_demand(event: dict, demand: dict) -> dict:
 
 
 
-def extract_bill(event: dict, bill: dict) -> dict:
+def extract_bill(bill: dict) -> dict:
     """Extract top-level bill fields into a row for bill_entity.
 
     The raw event carries a list of bills under the key 'bills'.
@@ -609,7 +609,7 @@ def extract_bill(event: dict, bill: dict) -> dict:
         modes_not_allowed = ','.join(str(m) for m in modes_not_allowed)
 
     return {
-        'tenant_id': event.get('tenantId', ''),
+        'tenant_id': bill.get('tenantId', ''),
         'bill_id': bill.get('id', ''),
         'status': bill.get('status', ''),
         'iscancelled': 1 if bill.get('isCancelled', False) else 0,
@@ -632,14 +632,14 @@ def extract_bill(event: dict, bill: dict) -> dict:
     }
 
 
-def extract_bill_details(event: dict, bill: dict) -> List[dict]:
+def extract_bill_details(bill: dict) -> List[dict]:
     """Expand billDetails array into rows for bill_detail_entity.
 
     Each billDetail becomes one row.  Audit fields are inherited from the
     parent bill's auditDetails since billDetails don't carry their own.
     financial_year is computed from fromPeriod / toPeriod.
     """
-    tenant_id = event.get('tenantId', '')
+    tenant_id = bill.get('tenantId', '')
     bill_id = bill.get('id', '')
     audit = bill.get('auditDetails', {}) or {}
 
@@ -681,7 +681,7 @@ def extract_bill_details(event: dict, bill: dict) -> List[dict]:
     return rows
 
 
-def extract_payment(event: dict, payment: dict) -> dict:
+def extract_payment(payment: dict) -> dict:
     """Extract and flatten a single payment event into a row for payment_with_details_entity.
 
     The raw event is expected to carry a top-level 'Payment' object whose
@@ -696,10 +696,9 @@ def extract_payment(event: dict, payment: dict) -> dict:
     # Pick the first payment detail for receipt-level scalar columns.
     # Downstream consumers that need all details should use the raw table.
     detail = details[0] if details else {}
-    bill = detail.get('bill', {}) or {}
 
     return {
-        'tenant_id': event.get('tenantId', ''),
+        'tenant_id': payment.get('tenantId', ''),
         'payment_id': payment.get('id', ''),
         'total_due': safe_dec(payment.get('totalDue'), 2),
         'total_amount_paid': safe_dec(payment.get('totalAmountPaid'), 2),
@@ -724,13 +723,13 @@ def extract_payment(event: dict, payment: dict) -> dict:
         'receiptdate': parse_ts(detail.get('receiptDate')) or EPOCH,
         'receipttype': detail.get('receiptType', ''),
         'businessservice': detail.get('businessService', ''),
-        'billid': bill.get('id', ''),
+        'billid': detail.get('billId', ''),
         'manualreceiptnumber': detail.get('manualReceiptNumber', ''),
         'manualreceiptdate': parse_ts(detail.get('manualReceiptDate')) or EPOCH,
     }
 
 
-def extract_property_audit(event: dict, prop: dict) -> dict:
+def extract_property_audit(prop: dict) -> dict:
     """Snapshot the current property state into property_audit_entity.
 
     Uses plain MergeTree (no ReplacingMergeTree) — every ingest intentionally
@@ -741,7 +740,7 @@ def extract_property_audit(event: dict, prop: dict) -> dict:
     owners = prop.get('owners', []) or []
 
     return {
-        'tenant_id': event.get('tenantId', ''),
+        'tenant_id': prop.get('tenantId', ''),
         'property_id': prop.get('propertyId', ''),
         'property_type': prop.get('propertyType', ''),
         'ownership_category': prop.get('ownershipCategory', ''),
@@ -758,27 +757,19 @@ def extract_property_audit(event: dict, prop: dict) -> dict:
 
 
 
-def extract_assessment(event: dict) -> dict:
-    """Map a raw assessment event to a property_assessment_entity row.
-
-    The assessment payload is the top-level event itself — there is no
-    nested wrapper key (unlike Payment which uses event['Payment']).
-    auditDetails carries the standard createdBy/createdTime/lastModifiedBy/
-    lastModifiedTime fields used for both audit columns and the ReplacingMergeTree
-    version key (last_modified_time).
-    """
-    audit = event.get('auditDetails', {}) or {}
+def extract_assessment(assessment: dict) -> dict:
+    audit = assessment.get('auditDetails', {}) or {}
 
     return {
-        'tenant_id': event.get('tenantId', ''),
-        'assessmentnumber': event.get('assessmentNumber', ''),
-        'financialyear': event.get('financialYear', ''),
-        'propertyid': event.get('propertyId', ''),
-        'status': event.get('status', ''),
-        'source': event.get('source', ''),
-        'channel': event.get('channel', ''),
-        'assessmentdate': parse_ts(event.get('assessmentDate')) or EPOCH,
-        'additionaldetails': json.dumps(event.get('additionalDetails')) if event.get('additionalDetails') else '',
+        'tenant_id': assessment.get('tenantId', ''),
+        'assessmentnumber': assessment.get('assessmentNumber', ''),
+        'financialyear': assessment.get('financialYear', ''),
+        'propertyid': assessment.get('propertyId', ''),
+        'status': assessment.get('status', ''),
+        'source': assessment.get('source', ''),
+        'channel': assessment.get('channel', ''),
+        'assessmentdate': parse_ts(assessment.get('assessmentDate')) or EPOCH,
+        'additionaldetails': json.dumps(assessment.get('additionalDetails')) if assessment.get('additionalDetails') else '',
         'created_by': audit.get('createdBy', ''),
         'created_time': parse_ts(audit.get('createdTime')) or EPOCH,
         'last_modified_by': audit.get('lastModifiedBy', ''),
@@ -918,14 +909,14 @@ def transform_load_property_events(**context):
                     logger.warning("Skipping invalid JSON")
                     continue
 
-                prop = event.get('property', {}) or {}
+                prop = event.get('Property', {}) or {}
                 if not prop.get('propertyId', ''):
                     continue
 
-                prop_rows.append(extract_property_address(event, prop))
-                unit_rows.extend(extract_units(event, prop))
-                owner_rows.extend(extract_owners(event, prop))
-                audit_rows.append(extract_property_audit(event, prop))
+                prop_rows.append(extract_property_address(prop))
+                unit_rows.extend(extract_units(prop))
+                owner_rows.extend(extract_owners(prop))
+                audit_rows.append(extract_property_audit(prop))
 
             # -- LOAD: insert this chunk into silver tables --
             batch_insert(client, 'property_address_entity', prop_rows, chunk_size=10000)
@@ -1000,11 +991,12 @@ def transform_load_demand_events(**context):
                     logger.warning("Skipping invalid JSON")
                     continue
 
-                demand = event.get('demand', {}) or {}
+                demands_list = event.get('Demands', []) or []
+                demand = demands_list[0] if demands_list else {}
                 if not demand.get('id', ''):
                     continue
 
-                demand_rows.append(extract_demand(event, demand))
+                demand_rows.append(extract_demand(demand))
 
             # -- LOAD: insert this chunk into silver table --
             batch_insert(client, 'demand_with_details_entity', demand_rows, chunk_size=10000)
@@ -1066,7 +1058,7 @@ def transform_load_payment_events(**context):
                 if not payment.get('id', ''):
                     continue
 
-                payment_rows.append(extract_payment(event, payment))
+                payment_rows.append(extract_payment(payment))
 
             # -- LOAD: insert this chunk into silver table --
             batch_insert(client, 'payment_with_details_entity', payment_rows, chunk_size=10000)
@@ -1156,13 +1148,13 @@ def transform_load_bill_events(**context):
                     continue
 
                 # bills is a list per the POJO: private List<Bill> bills
-                bills = event.get('bills', []) or []
+                bills = event.get('Bills', []) or []
                 for bill in bills:
                     if not bill.get('id', ''):
                         continue
 
-                    bill_rows.append(extract_bill(event, bill))
-                    detail_rows.extend(extract_bill_details(event, bill))
+                    bill_rows.append(extract_bill(bill))
+                    detail_rows.extend(extract_bill_details(bill))
 
             # -- LOAD: insert this chunk into silver tables --
             batch_insert(client, 'bill_entity', bill_rows, chunk_size=10000)
@@ -1260,10 +1252,11 @@ def transform_load_assessment_events(**context):
                     logger.warning("Skipping invalid JSON")
                     continue
 
-                if not event.get('assessmentNumber', ''):
+                assessment = event.get('Assessment', {}) or {}
+                if not assessment.get('assessmentNumber', ''):
                     continue
 
-                assessment_rows.append(extract_assessment(event))
+                assessment_rows.append(extract_assessment(assessment))
 
             # -- LOAD: insert this chunk into silver table --
             batch_insert(client, 'property_assessment_entity', assessment_rows, chunk_size=10000)
