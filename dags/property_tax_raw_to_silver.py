@@ -304,10 +304,9 @@ def count_payment_events(client, window_start: datetime,
 def fetch_bill_events(client, window_start: datetime,
                       window_end: datetime, limit: int = None,
                       offset: int = 0) -> List[str]:
-    """Fetch raw JSON strings where event_time falls within
-    [window_start, window_end) with optional pagination."""
+    """Fetch raw payment JSON — bill data is embedded in Payment.paymentDetails[n].bill."""
     query = (
-        "SELECT raw FROM bill_events_raw "
+        "SELECT raw FROM payment_events_raw "
         "WHERE event_time >= {start:DateTime64(3)} "
         "AND event_time < {end:DateTime64(3)} "
         "ORDER BY event_time "
@@ -326,9 +325,9 @@ def fetch_bill_events(client, window_start: datetime,
 
 def count_bill_events(client, window_start: datetime,
                       window_end: datetime) -> int:
-    """Count total bill events in the time window."""
+    """Count payment events — bill data is embedded inside each payment."""
     result = client.query(
-        "SELECT count() FROM bill_events_raw "
+        "SELECT count() FROM payment_events_raw "
         "WHERE event_time >= {start:DateTime64(3)} "
         "AND event_time < {end:DateTime64(3)}",
         parameters={'start': window_start, 'end': window_end},
@@ -593,32 +592,23 @@ def extract_demand(demand: dict) -> dict:
 
 def extract_bill(bill: dict) -> dict:
     audit = bill.get('auditDetails', {}) or {}
-
-    # status, billNumber, billDate, consumerCode, minimumAmount live in billDetails[0]
-    details = bill.get('billDetails', []) or []
-    detail = details[0] if details else {}
-
-    # businessService and totalAmount live in taxAndPayments[0]
-    tax_payments = bill.get('taxAndPayments', []) or []
-    tax_payment = tax_payments[0] if tax_payments else {}
-
     fy = compute_financial_year(audit.get('createdTime'))
 
     return {
         'tenant_id': bill.get('tenantId', ''),
         'bill_id': bill.get('id', ''),
-        'status': detail.get('status', ''),
+        'status': bill.get('status', ''),
         'iscancelled': 1 if bill.get('isCancelled', False) else 0,
         'additionaldetails': json.dumps(bill.get('additionalDetails')) if bill.get('additionalDetails') else '',
-        'collectionmodesnotallowed': '',
-        'partpaymentallowed': 0,
-        'isadvanceallowed': 0,
-        'minimumamounttobepaid': safe_dec(detail.get('minimumAmount'), 2),
-        'businessservice': tax_payment.get('businessService', ''),
-        'totalamount': safe_dec(tax_payment.get('taxAmount'), 2),
-        'consumercode': detail.get('consumerCode', ''),
-        'billnumber': detail.get('billNumber', ''),
-        'billdate': parse_ts(detail.get('billDate')) or EPOCH,
+        'collectionmodesnotallowed': ','.join(bill.get('collectionModesNotAllowed') or []),
+        'partpaymentallowed': 1 if bill.get('partPaymentAllowed', False) else 0,
+        'isadvanceallowed': 1 if bill.get('isAdvanceAllowed', False) else 0,
+        'minimumamounttobepaid': safe_dec(bill.get('minimumAmountToBePaid'), 2),
+        'businessservice': bill.get('businessService', ''),
+        'totalamount': safe_dec(bill.get('totalAmount'), 2),
+        'consumercode': bill.get('consumerCode', ''),
+        'billnumber': bill.get('billNumber', ''),
+        'billdate': parse_ts(bill.get('billDate')) or EPOCH,
         'reasonforcancellation': bill.get('reasonForCancellation', ''),
         'created_by': audit.get('createdBy', ''),
         'created_time': parse_ts(audit.get('createdTime')) or EPOCH,
@@ -629,12 +619,6 @@ def extract_bill(bill: dict) -> dict:
 
 
 def extract_bill_details(bill: dict) -> List[dict]:
-    """Expand billDetails array into rows for bill_detail_entity.
-
-    Each billDetail becomes one row.  Audit fields are inherited from the
-    parent bill's auditDetails since billDetails don't carry their own.
-    financial_year is computed from fromPeriod / toPeriod.
-    """
     tenant_id = bill.get('tenantId', '')
     bill_id = bill.get('id', '')
     audit = bill.get('auditDetails', {}) or {}
@@ -650,12 +634,12 @@ def extract_bill_details(bill: dict) -> List[dict]:
         fy = compute_financial_year(from_period)
 
         rows.append({
-            'id': detail_id,
+               'id': detail_id,
             'tenant_id': tenant_id,
             'demand_id': detail.get('demandId', ''),
             'bill_id': bill_id,
-            'amount': safe_dec(detail.get('totalAmount'), 2),
-            'amount_paid': safe_dec(detail.get('collectedAmount'), 2),
+            'amount': safe_dec(detail.get('amount'), 2),
+            'amount_paid': safe_dec(detail.get('amountPaid'), 2),
             'from_period': from_period,
             'to_period': to_period,
             'additional_details': json.dumps(detail.get('additionalDetails')) if detail.get('additionalDetails') else '',
@@ -1141,6 +1125,8 @@ def transform_load_bill_events(**context):
             bill_rows = []
             detail_rows = []
 
+            seen_bill_ids: set = set()
+
             for raw_json in raw_jsons:
                 try:
                     event = json.loads(raw_json)
@@ -1148,12 +1134,14 @@ def transform_load_bill_events(**context):
                     logger.warning("Skipping invalid JSON")
                     continue
 
-                # bills is a list per the POJO: private List<Bill> bills
-                bills = event.get('Bills', []) or []
-                for bill in bills:
-                    if not bill.get('id', ''):
+                # Bill is embedded in Payment.paymentDetails[n].bill
+                payment = event.get('Payment', {}) or {}
+                for pd in (payment.get('paymentDetails', []) or []):
+                    bill = pd.get('bill', {}) or {}
+                    bill_id = bill.get('id', '')
+                    if not bill_id or bill_id in seen_bill_ids:
                         continue
-
+                    seen_bill_ids.add(bill_id)
                     bill_rows.append(extract_bill(bill))
                     detail_rows.extend(extract_bill_details(bill))
 
