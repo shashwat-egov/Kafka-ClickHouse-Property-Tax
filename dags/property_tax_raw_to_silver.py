@@ -50,7 +50,7 @@ ReplacingMergeTree Logic:
 import os
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import List, Dict, Optional, Tuple
 
@@ -401,22 +401,22 @@ def extract_property_address(prop: dict) -> dict:
         'created_time': parse_ts(audit.get('createdTime')) or EPOCH,
         'last_modified_by': audit.get('lastModifiedBy', ''),
         'last_modified_time': parse_ts(audit.get('lastModifiedTime')) or EPOCH,
-        'financial_year': prop.get('financialYear', ''),
+        'financial_year': compute_financial_year(audit.get('createdTime')),
         'additionaldetails': json.dumps(prop.get('additionalDetails')) if prop.get('additionalDetails') else '',
         'door_no': addr.get('doorNo', ''),
         'plot_no': addr.get('plotNo', ''),
         'building_name': addr.get('buildingName', ''),
         'street': addr.get('street', ''),
         'landmark': addr.get('landmark', ''),
-        'locality': addr.get('locality', ''),
+        'locality': addr.get('locality', {}).get('code', '') if isinstance(addr.get('locality'), dict) else addr.get('locality', ''),
         'city': addr.get('city', ''),
         'district': addr.get('district', ''),
         'region': addr.get('region', ''),
         'state': addr.get('state', ''),
         'country': addr.get('country', 'IN'),
         'pin_code': addr.get('pincode', ''),
-        'latitude': safe_dec(addr.get('latitude'), 6),
-        'longitude': safe_dec(addr.get('longitude'), 7),
+        'latitude': safe_dec((addr.get('geoLocation') or {}).get('latitude') or addr.get('latitude'), 6),
+        'longitude': safe_dec((addr.get('geoLocation') or {}).get('longitude') or addr.get('longitude'), 7),
     }
 
 
@@ -430,6 +430,7 @@ def extract_units(prop: dict) -> List[dict]:
         if not uid:
             continue
         u_audit = u.get('auditDetails', {}) or {}
+        cd = u.get('constructionDetail', {}) or {}
         rows.append({
             'tenant_id': tenant_id,
             'property_uuid': property_uuid,
@@ -439,13 +440,13 @@ def extract_units(prop: dict) -> List[dict]:
             'usage_category': u.get('usageCategory', ''),
             'occupancy_type': u.get('occupancyType', ''),
             'occupancy_date': (parse_ts(u.get('occupancyDate')) or EPOCH).date(),
-            'carpet_area': safe_dec(u.get('carpetArea')),
-            'built_up_area': safe_dec(u.get('builtUpArea')),
-            'plinth_area': safe_dec(u.get('plinthArea')),
-            'super_built_up_area': safe_dec(u.get('superBuiltUpArea')),
+            'carpet_area': safe_dec(cd.get('carpetArea')),
+            'built_up_area': safe_dec(cd.get('builtUpArea')),
+            'plinth_area': safe_dec(cd.get('plinthArea')),
+            'super_built_up_area': safe_dec(cd.get('superBuiltUpArea')),
             'arv': safe_dec(u.get('arv')),
-            'construction_type': u.get('constructionType', ''),
-            'construction_date': safe_int(u.get('constructionDate', 0)),
+            'construction_type': cd.get('constructionType', ''),
+            'construction_date': safe_int(cd.get('constructionDate', 0)),
             'active': 1 if u.get('active', True) else 0,
             'created_by': u_audit.get('createdBy', ''),
             'created_time': parse_ts(u_audit.get('createdTime')) or EPOCH,
@@ -469,22 +470,21 @@ def extract_owners(prop: dict) -> List[dict]:
         oid = o.get('ownerInfoUuid', '')
         if not oid:
             continue
-        o_audit = o.get('auditDetails', {}) or {}
         rows.append({
             'tenant_id': tenant_id,
             'property_uuid': property_uuid,
             'owner_info_uuid': oid,
-            'user_id': o.get('userId', ''),
+            'user_id': o.get('uuid', ''),
             'status': o.get('status', ''),
             'is_primary_owner': 1 if o.get('isPrimaryOwner', False) else 0,
             'owner_type': o.get('ownerType', ''),
-            'ownership_percentage': str(o.get('ownershipPercentage', '')),
+            'ownership_percentage': str(o.get('ownerShipPercentage') or o.get('ownershipPercentage') or ''),
             'institution_id': o.get('institutionId', ''),
             'relationship': o.get('relationship', ''),
-            'created_by': o_audit.get('createdBy', ''),
-            'created_time': parse_ts(o_audit.get('createdTime')) or EPOCH,
-            'last_modified_by': o_audit.get('lastModifiedBy', ''),
-            'last_modified_time': parse_ts(o_audit.get('lastModifiedTime')) or EPOCH,
+            'created_by': o.get('createdBy', ''),
+            'created_time': parse_ts(o.get('createdDate')) or EPOCH,
+            'last_modified_by': o.get('lastModifiedBy', ''),
+            'last_modified_time': parse_ts(o.get('lastModifiedDate')) or EPOCH,
             'property_id': property_id,
             'property_type': prop.get('propertyType', ''),
             'ownership_category': prop.get('ownershipCategory', ''),
@@ -494,13 +494,19 @@ def extract_owners(prop: dict) -> List[dict]:
     return rows
 
 
-def compute_financial_year(tax_period_from_ms) -> str:
-    dt = parse_ts(tax_period_from_ms)
-    if dt is None:
+def compute_financial_year(epoch_ms) -> str:
+    """Derive Indian fiscal year (Apr–Mar) from epoch-millis using UTC."""
+    if not epoch_ms:
         return ''
-    if dt.month >= 4:
-        return f"{dt.year}-{(dt.year + 1) % 100:02d}"
-    return f"{dt.year - 1}-{dt.year % 100:02d}"
+    try:
+        ms = int(epoch_ms)
+    except (TypeError, ValueError):
+        return ''
+    if ms == 0:
+        return ''
+    dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+    start_year = dt.year if dt.month >= 4 else dt.year - 1
+    return f"{start_year}-{(start_year + 1) % 100:02d}"
 
 
 def extract_demand(demand: dict) -> dict:
@@ -513,7 +519,7 @@ def extract_demand(demand: dict) -> dict:
     total_collection = Decimal('0')
 
     for d in details:
-        code = d.get('taxHeadCode', '')
+        code = d.get('taxHeadMasterCode', '')
         if not code:
             continue
         ta = safe_dec(d.get('taxAmount'), 4)
@@ -523,9 +529,7 @@ def extract_demand(demand: dict) -> dict:
         total_tax += ta
         total_collection += ca
 
-    explicit_fy = demand.get('financialYear', '')
-    fy = explicit_fy if explicit_fy else compute_financial_year(
-        demand.get('taxPeriodFrom'))
+    fy = compute_financial_year(demand.get('taxPeriodFrom'))
 
     outstanding_amount = round(total_tax - total_collection, 2)
     is_paid = 1 if outstanding_amount <= 0 else 0
@@ -536,7 +540,7 @@ def extract_demand(demand: dict) -> dict:
         'consumer_code': demand.get('consumerCode', ''),
         'consumer_type': demand.get('consumerType', ''),
         'business_service': demand.get('businessService', ''),
-        'payer': demand.get('payer', ''),
+        'payer': demand.get('payer', {}).get('uuid', '') if isinstance(demand.get('payer'), dict) else demand.get('payer', ''),
         'tax_period_from': parse_ts(demand.get('taxPeriodFrom')) or EPOCH,
         'tax_period_to': parse_ts(demand.get('taxPeriodTo')) or EPOCH,
         'demand_status': demand.get('status', ''),
@@ -588,47 +592,39 @@ def extract_demand(demand: dict) -> dict:
 
 
 def extract_bill(bill: dict) -> dict:
-    """Extract top-level bill fields into a row for bill_entity.
-
-    The raw event carries a list of bills under the key 'bills'.
-    This function handles one bill at a time; callers loop over the list.
-    financial_year is derived from billDetails[0].fromPeriod when not
-    set explicitly on the bill itself.
-    """
     audit = bill.get('auditDetails', {}) or {}
+
+    # status, billNumber, billDate, consumerCode, minimumAmount live in billDetails[0]
     details = bill.get('billDetails', []) or []
+    detail = details[0] if details else {}
 
-    # Derive financial year from the first billDetail's fromPeriod when absent
-    explicit_fy = bill.get('financialYear', '')
-    if not explicit_fy and details:
-        explicit_fy = compute_financial_year(details[0].get('fromPeriod'))
+    # businessService and totalAmount live in taxAndPayments[0]
+    tax_payments = bill.get('taxAndPayments', []) or []
+    tax_payment = tax_payments[0] if tax_payments else {}
 
-    # collectionModesNotAllowed is a list in the POJO -> store as CSV string
-    modes_not_allowed = bill.get('collectionModesNotAllowed', []) or []
-    if isinstance(modes_not_allowed, list):
-        modes_not_allowed = ','.join(str(m) for m in modes_not_allowed)
+    fy = compute_financial_year(audit.get('createdTime'))
 
     return {
         'tenant_id': bill.get('tenantId', ''),
         'bill_id': bill.get('id', ''),
-        'status': bill.get('status', ''),
+        'status': detail.get('status', ''),
         'iscancelled': 1 if bill.get('isCancelled', False) else 0,
         'additionaldetails': json.dumps(bill.get('additionalDetails')) if bill.get('additionalDetails') else '',
-        'collectionmodesnotallowed': modes_not_allowed,
-        'partpaymentallowed': 1 if bill.get('partPaymentAllowed', False) else 0,
-        'isadvanceallowed': 1 if bill.get('isAdvanceAllowed', False) else 0,
-        'minimumamounttobepaid': safe_dec(bill.get('minimumAmountToBePaid'), 2),
-        'businessservice': bill.get('businessService', ''),
-        'totalamount': safe_dec(bill.get('totalAmount'), 2),
-        'consumercode': bill.get('consumerCode', ''),
-        'billnumber': bill.get('billNumber', ''),
-        'billdate': parse_ts(bill.get('billDate')) or EPOCH,
+        'collectionmodesnotallowed': '',
+        'partpaymentallowed': 0,
+        'isadvanceallowed': 0,
+        'minimumamounttobepaid': safe_dec(detail.get('minimumAmount'), 2),
+        'businessservice': tax_payment.get('businessService', ''),
+        'totalamount': safe_dec(tax_payment.get('taxAmount'), 2),
+        'consumercode': detail.get('consumerCode', ''),
+        'billnumber': detail.get('billNumber', ''),
+        'billdate': parse_ts(detail.get('billDate')) or EPOCH,
         'reasonforcancellation': bill.get('reasonForCancellation', ''),
         'created_by': audit.get('createdBy', ''),
         'created_time': parse_ts(audit.get('createdTime')) or EPOCH,
         'last_modified_by': audit.get('lastModifiedBy', ''),
         'last_modified_time': parse_ts(audit.get('lastModifiedTime')) or EPOCH,
-        'financial_year': explicit_fy,
+        'financial_year': fy,
     }
 
 
@@ -651,15 +647,15 @@ def extract_bill_details(bill: dict) -> List[dict]:
 
         from_period = safe_int(detail.get('fromPeriod', 0))
         to_period = safe_int(detail.get('toPeriod', 0))
-        fy = compute_financial_year(from_period) if from_period else ''
+        fy = compute_financial_year(from_period)
 
         rows.append({
             'id': detail_id,
             'tenant_id': tenant_id,
             'demand_id': detail.get('demandId', ''),
             'bill_id': bill_id,
-            'amount': safe_dec(detail.get('amount'), 2),
-            'amount_paid': safe_dec(detail.get('amountPaid'), 2),
+            'amount': safe_dec(detail.get('totalAmount'), 2),
+            'amount_paid': safe_dec(detail.get('collectedAmount'), 2),
             'from_period': from_period,
             'to_period': to_period,
             'additional_details': json.dumps(detail.get('additionalDetails')) if detail.get('additionalDetails') else '',
@@ -716,8 +712,8 @@ def extract_payment(payment: dict) -> dict:
         'created_time': parse_ts(audit.get('createdTime')) or EPOCH,
         'last_modified_by': audit.get('lastModifiedBy', ''),
         'last_modified_time': parse_ts(audit.get('lastModifiedTime')) or EPOCH,
-        'financial_year': payment.get('financialYear', ''),
-        'filestore_id': payment.get('filestoreId', ''),
+        'financial_year': compute_financial_year(payment.get('transactionDate')),
+        'filestore_id': payment.get('fileStoreId', ''),
         # Payment detail / receipt fields (from first paymentDetail entry)
         'receiptnumber': detail.get('receiptNumber', ''),
         'receiptdate': parse_ts(detail.get('receiptDate')) or EPOCH,
@@ -738,6 +734,11 @@ def extract_property_audit(prop: dict) -> dict:
     """
     audit = prop.get('auditDetails', {}) or {}
     owners = prop.get('owners', []) or []
+    units = prop.get('units', []) or []
+
+    # Sum builtUpArea and superBuiltUpArea across all units (lives in constructionDetail)
+    built_up_area = sum(safe_dec((u.get('constructionDetail') or {}).get('builtUpArea'), 2) for u in units)
+    super_built_up_area = sum(safe_dec((u.get('constructionDetail') or {}).get('superBuiltUpArea'), 2) for u in units)
 
     return {
         'tenant_id': prop.get('tenantId', ''),
@@ -746,9 +747,9 @@ def extract_property_audit(prop: dict) -> dict:
         'ownership_category': prop.get('ownershipCategory', ''),
         'usage_category': prop.get('usageCategory', ''),
         'property_status': prop.get('status', ''),
-        'workflow_state': prop.get('workflowCode', ''),
-        'super_built_up_area': safe_dec(prop.get('superBuiltUpArea'), 2),
-        'built_up_area': safe_dec(prop.get('builtUpArea'), 2),
+        'workflow_state': ((prop.get('workflow') or {}).get('state') or {}).get('state', ''),
+        'super_built_up_area': super_built_up_area,
+        'built_up_area': built_up_area,
         'land_area': safe_dec(prop.get('landArea'), 2),
         'owner_count': safe_int(len(owners)),
         'created_time': parse_ts(audit.get('createdTime')) or EPOCH,
@@ -763,7 +764,7 @@ def extract_assessment(assessment: dict) -> dict:
     return {
         'tenant_id': assessment.get('tenantId', ''),
         'assessmentnumber': assessment.get('assessmentNumber', ''),
-        'financialyear': assessment.get('financialYear', ''),
+        'financialyear': compute_financial_year(audit.get('createdTime')),
         'propertyid': assessment.get('propertyId', ''),
         'status': assessment.get('status', ''),
         'source': assessment.get('source', ''),
