@@ -909,6 +909,8 @@ def transform_load_property_events(**context):
                 audit_rows.append(extract_property_audit(prop))
 
             # -- LOAD: insert this chunk into silver tables --
+            chunk_len = len(raw_jsons)
+            del raw_jsons
             batch_insert(client, 'property_address_entity', prop_rows, chunk_size=10000)
             batch_insert(client, 'property_unit_entity', unit_rows, chunk_size=10000)
             batch_insert(client, 'property_owner_entity', owner_rows, chunk_size=10000)
@@ -920,7 +922,7 @@ def transform_load_property_events(**context):
             total_audits += len(audit_rows)
 
             logger.info(
-                f"Chunk {offset}-{offset + len(raw_jsons)}: "
+                f"Chunk {offset}-{offset + chunk_len}: "
                 f"{len(prop_rows)} props, {len(unit_rows)} units, {len(owner_rows)} owners, {len(audit_rows)} audits | "
                 f"Total: {total_props}/{total_units}/{total_owners}/{total_audits}"
             )
@@ -991,10 +993,12 @@ def transform_load_demand_events(**context):
                 demand_rows.append(extract_demand(demand))
 
             # -- LOAD: insert this chunk into silver table --
+            chunk_len = len(raw_jsons)
+            del raw_jsons
             batch_insert(client, 'demand_with_details_entity', demand_rows, chunk_size=10000)
 
             total_demands += len(demand_rows)
-            logger.info(f"Chunk {offset}-{offset + len(raw_jsons)}: {len(demand_rows)} demands | Total: {total_demands}")
+            logger.info(f"Chunk {offset}-{offset + chunk_len}: {len(demand_rows)} demands | Total: {total_demands}")
             offset += STREAM_BATCH_SIZE
 
         peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -1055,10 +1059,12 @@ def transform_load_payment_events(**context):
                 payment_rows.append(extract_payment(payment))
 
             # -- LOAD: insert this chunk into silver table --
+            chunk_len = len(raw_jsons)
+            del raw_jsons
             batch_insert(client, 'payment_with_details_entity', payment_rows, chunk_size=10000)
 
             total_payments += len(payment_rows)
-            logger.info(f"Chunk {offset}-{offset + len(raw_jsons)}: {len(payment_rows)} payments | Total: {total_payments}")
+            logger.info(f"Chunk {offset}-{offset + chunk_len}: {len(payment_rows)} payments | Total: {total_payments}")
             offset += STREAM_BATCH_SIZE
 
         peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -1158,6 +1164,8 @@ def transform_load_bill_events(**context):
                     detail_rows.extend(extract_bill_details(bill))
 
             # -- LOAD: insert this chunk into silver tables --
+            chunk_len = len(raw_jsons)
+            del raw_jsons
             batch_insert(client, 'bill_entity', bill_rows, chunk_size=10000)
             batch_insert(client, 'bill_detail_entity', detail_rows, chunk_size=10000)
 
@@ -1165,7 +1173,7 @@ def transform_load_bill_events(**context):
             total_details += len(detail_rows)
 
             logger.info(
-                f"Chunk {offset}-{offset + len(raw_jsons)}: "
+                f"Chunk {offset}-{offset + chunk_len}: "
                 f"{len(bill_rows)} bills, {len(detail_rows)} details | "
                 f"Total: {total_bills}/{total_details}"
             )
@@ -1263,11 +1271,13 @@ def transform_load_assessment_events(**context):
                 assessment_rows.append(extract_assessment(assessment))
 
             # -- LOAD: insert this chunk into silver table --
+            chunk_len = len(raw_jsons)
+            del raw_jsons
             batch_insert(client, 'property_assessment_entity', assessment_rows, chunk_size=10000)
 
             total_assessments += len(assessment_rows)
             logger.info(
-                f"Chunk {offset}-{offset + len(raw_jsons)}: "
+                f"Chunk {offset}-{offset + chunk_len}: "
                 f"{len(assessment_rows)} assessments | Total: {total_assessments}"
             )
             offset += STREAM_BATCH_SIZE
