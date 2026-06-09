@@ -50,6 +50,7 @@ ReplacingMergeTree Logic:
 import os
 import json
 import logging
+import resource
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import List, Dict, Optional, Tuple
@@ -73,7 +74,7 @@ CLICKHOUSE_PASSWORD = os.getenv('CLICKHOUSE_PASSWORD', '')
 CLICKHOUSE_DB = os.getenv('CLICKHOUSE_DB', 'kafka-events')
 
 # Streaming configuration for large datasets
-STREAM_BATCH_SIZE = 10000  # Process records in batches of 50k
+STREAM_BATCH_SIZE = 10000  # Process records in batches of 10k
 
 default_args = {
     'owner': 'property_tax',
@@ -779,7 +780,8 @@ def extract_property_events(**context):
     client = get_client()
     try:
         total_count = count_property_events(client, window_start, window_end)
-        logger.info(f"Property events found: {total_count}")
+        peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        logger.info(f"Property events found: {total_count} | peak_memory={peak_kb // 1024} MiB")
 
         return {
             'total_count': total_count,
@@ -805,7 +807,8 @@ def extract_demand_events(**context):
     client = get_client()
     try:
         total_count = count_demand_events(client, window_start, window_end)
-        logger.info(f"Demand events found: {total_count}")
+        peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        logger.info(f"Demand events found: {total_count} | peak_memory={peak_kb // 1024} MiB")
 
         return {
             'total_count': total_count,
@@ -831,7 +834,8 @@ def extract_payment_events(**context):
     client = get_client()
     try:
         total_count = count_payment_events(client, window_start, window_end)
-        logger.info(f"Payment events found: {total_count}")
+        peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        logger.info(f"Payment events found: {total_count} | peak_memory={peak_kb // 1024} MiB")
 
         return {
             'total_count': total_count,
@@ -864,7 +868,8 @@ def transform_load_property_events(**context):
     ws = datetime.fromisoformat(metadata['window_start'])
     we = datetime.fromisoformat(metadata['window_end'])
 
-    logger.info(f"Processing {total_count} property events in chunks of {STREAM_BATCH_SIZE}")
+    base_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    logger.info(f"Processing {total_count} property events in chunks of {STREAM_BATCH_SIZE} | base_memory={base_kb // 1024} MiB")
 
     client = get_client()
     try:
@@ -927,7 +932,8 @@ def transform_load_property_events(**context):
             'owners': total_owners,
             'audits': total_audits,
         }
-        logger.info(f"Property processing complete: {counts}")
+        peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        logger.info(f"Property processing complete: {counts} | peak_memory={peak_kb // 1024} MiB")
         return counts
 
     finally:
@@ -952,7 +958,8 @@ def transform_load_demand_events(**context):
     ws = datetime.fromisoformat(metadata['window_start'])
     we = datetime.fromisoformat(metadata['window_end'])
 
-    logger.info(f"Processing {total_count} demand events in chunks of {STREAM_BATCH_SIZE}")
+    base_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    logger.info(f"Processing {total_count} demand events in chunks of {STREAM_BATCH_SIZE} | base_memory={base_kb // 1024} MiB")
 
     client = get_client()
     try:
@@ -990,7 +997,8 @@ def transform_load_demand_events(**context):
             logger.info(f"Chunk {offset}-{offset + len(raw_jsons)}: {len(demand_rows)} demands | Total: {total_demands}")
             offset += STREAM_BATCH_SIZE
 
-        logger.info(f"Demand processing complete: {total_demands} rows")
+        peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        logger.info(f"Demand processing complete: {total_demands} rows | peak_memory={peak_kb // 1024} MiB")
         return {'demands': total_demands}
 
     finally:
@@ -1015,7 +1023,8 @@ def transform_load_payment_events(**context):
     ws = datetime.fromisoformat(metadata['window_start'])
     we = datetime.fromisoformat(metadata['window_end'])
 
-    logger.info(f"Processing {total_count} payment events in chunks of {STREAM_BATCH_SIZE}")
+    base_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    logger.info(f"Processing {total_count} payment events in chunks of {STREAM_BATCH_SIZE} | base_memory={base_kb // 1024} MiB")
 
     client = get_client()
     try:
@@ -1052,7 +1061,8 @@ def transform_load_payment_events(**context):
             logger.info(f"Chunk {offset}-{offset + len(raw_jsons)}: {len(payment_rows)} payments | Total: {total_payments}")
             offset += STREAM_BATCH_SIZE
 
-        logger.info(f"Payment processing complete: {total_payments} rows")
+        peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        logger.info(f"Payment processing complete: {total_payments} rows | peak_memory={peak_kb // 1024} MiB")
         return {'payments': total_payments}
 
     finally:
@@ -1073,7 +1083,8 @@ def extract_bill_events(**context):
     client = get_client()
     try:
         total_count = count_bill_events(client, window_start, window_end)
-        logger.info(f"Bill events found: {total_count}")
+        peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        logger.info(f"Bill events found: {total_count} | peak_memory={peak_kb // 1024} MiB")
 
         return {
             'total_count': total_count,
@@ -1106,7 +1117,8 @@ def transform_load_bill_events(**context):
     ws = datetime.fromisoformat(metadata['window_start'])
     we = datetime.fromisoformat(metadata['window_end'])
 
-    logger.info(f"Processing {total_count} bill events in chunks of {STREAM_BATCH_SIZE}")
+    base_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    logger.info(f"Processing {total_count} bill events in chunks of {STREAM_BATCH_SIZE} | base_memory={base_kb // 1024} MiB")
 
     client = get_client()
     try:
@@ -1163,7 +1175,8 @@ def transform_load_bill_events(**context):
             'bills': total_bills,
             'bill_details': total_details,
         }
-        logger.info(f"Bill processing complete: {counts}")
+        peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        logger.info(f"Bill processing complete: {counts} | peak_memory={peak_kb // 1024} MiB")
         return counts
 
     finally:
@@ -1187,7 +1200,8 @@ def extract_assessment_events(**context):
     client = get_client()
     try:
         total_count = count_assessment_events(client, window_start, window_end)
-        logger.info(f"Assessment events found: {total_count}")
+        peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        logger.info(f"Assessment events found: {total_count} | peak_memory={peak_kb // 1024} MiB")
 
         return {
             'total_count': total_count,
@@ -1217,7 +1231,8 @@ def transform_load_assessment_events(**context):
     ws = datetime.fromisoformat(metadata['window_start'])
     we = datetime.fromisoformat(metadata['window_end'])
 
-    logger.info(f"Processing {total_count} assessment events in chunks of {STREAM_BATCH_SIZE}")
+    base_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    logger.info(f"Processing {total_count} assessment events in chunks of {STREAM_BATCH_SIZE} | base_memory={base_kb // 1024} MiB")
 
     client = get_client()
     try:
@@ -1257,7 +1272,8 @@ def transform_load_assessment_events(**context):
             )
             offset += STREAM_BATCH_SIZE
 
-        logger.info(f"Assessment processing complete: {total_assessments} rows")
+        peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        logger.info(f"Assessment processing complete: {total_assessments} rows | peak_memory={peak_kb // 1024} MiB")
         return {'assessments': total_assessments}
 
     finally:
