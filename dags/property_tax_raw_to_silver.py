@@ -50,6 +50,7 @@ ReplacingMergeTree Logic:
 import os
 import json
 import logging
+import gc
 import resource
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -74,7 +75,7 @@ CLICKHOUSE_PASSWORD = os.getenv('CLICKHOUSE_PASSWORD', '')
 CLICKHOUSE_DB = os.getenv('CLICKHOUSE_DB', 'kafka-events')
 
 # Streaming configuration for large datasets
-STREAM_BATCH_SIZE = 10000  # Process records in batches of 10k
+STREAM_BATCH_SIZE = 1000  # Process records in batches of 1k
 
 default_args = {
     'owner': 'property_tax',
@@ -912,18 +913,22 @@ def transform_load_property_events(**context):
             chunk_len = len(raw_jsons)
             del raw_jsons
             batch_insert(client, 'property_address_entity', prop_rows, chunk_size=10000)
-            batch_insert(client, 'property_unit_entity', unit_rows, chunk_size=10000)
-            batch_insert(client, 'property_owner_entity', owner_rows, chunk_size=10000)
-            batch_insert(client, 'property_audit_entity', audit_rows, chunk_size=10000)
+            n_props = len(prop_rows); total_props += n_props; prop_rows.clear()
 
-            total_props += len(prop_rows)
-            total_units += len(unit_rows)
-            total_owners += len(owner_rows)
-            total_audits += len(audit_rows)
+            batch_insert(client, 'property_unit_entity', unit_rows, chunk_size=10000)
+            n_units = len(unit_rows); total_units += n_units; unit_rows.clear()
+
+            batch_insert(client, 'property_owner_entity', owner_rows, chunk_size=10000)
+            n_owners = len(owner_rows); total_owners += n_owners; owner_rows.clear()
+
+            batch_insert(client, 'property_audit_entity', audit_rows, chunk_size=10000)
+            n_audits = len(audit_rows); total_audits += n_audits; audit_rows.clear()
+
+            gc.collect()
 
             logger.info(
                 f"Chunk {offset}-{offset + chunk_len}: "
-                f"{len(prop_rows)} props, {len(unit_rows)} units, {len(owner_rows)} owners, {len(audit_rows)} audits | "
+                f"{n_props} props, {n_units} units, {n_owners} owners, {n_audits} audits | "
                 f"Total: {total_props}/{total_units}/{total_owners}/{total_audits}"
             )
             offset += STREAM_BATCH_SIZE
@@ -996,9 +1001,10 @@ def transform_load_demand_events(**context):
             chunk_len = len(raw_jsons)
             del raw_jsons
             batch_insert(client, 'demand_with_details_entity', demand_rows, chunk_size=10000)
+            n_demands = len(demand_rows); total_demands += n_demands; demand_rows.clear()
+            gc.collect()
 
-            total_demands += len(demand_rows)
-            logger.info(f"Chunk {offset}-{offset + chunk_len}: {len(demand_rows)} demands | Total: {total_demands}")
+            logger.info(f"Chunk {offset}-{offset + chunk_len}: {n_demands} demands | Total: {total_demands}")
             offset += STREAM_BATCH_SIZE
 
         peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -1062,9 +1068,10 @@ def transform_load_payment_events(**context):
             chunk_len = len(raw_jsons)
             del raw_jsons
             batch_insert(client, 'payment_with_details_entity', payment_rows, chunk_size=10000)
+            n_payments = len(payment_rows); total_payments += n_payments; payment_rows.clear()
+            gc.collect()
 
-            total_payments += len(payment_rows)
-            logger.info(f"Chunk {offset}-{offset + chunk_len}: {len(payment_rows)} payments | Total: {total_payments}")
+            logger.info(f"Chunk {offset}-{offset + chunk_len}: {n_payments} payments | Total: {total_payments}")
             offset += STREAM_BATCH_SIZE
 
         peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -1167,14 +1174,16 @@ def transform_load_bill_events(**context):
             chunk_len = len(raw_jsons)
             del raw_jsons
             batch_insert(client, 'bill_entity', bill_rows, chunk_size=10000)
-            batch_insert(client, 'bill_detail_entity', detail_rows, chunk_size=10000)
+            n_bills = len(bill_rows); total_bills += n_bills; bill_rows.clear()
 
-            total_bills += len(bill_rows)
-            total_details += len(detail_rows)
+            batch_insert(client, 'bill_detail_entity', detail_rows, chunk_size=10000)
+            n_details = len(detail_rows); total_details += n_details; detail_rows.clear()
+
+            gc.collect()
 
             logger.info(
                 f"Chunk {offset}-{offset + chunk_len}: "
-                f"{len(bill_rows)} bills, {len(detail_rows)} details | "
+                f"{n_bills} bills, {n_details} details | "
                 f"Total: {total_bills}/{total_details}"
             )
             offset += STREAM_BATCH_SIZE
@@ -1274,11 +1283,12 @@ def transform_load_assessment_events(**context):
             chunk_len = len(raw_jsons)
             del raw_jsons
             batch_insert(client, 'property_assessment_entity', assessment_rows, chunk_size=10000)
+            n_assessments = len(assessment_rows); total_assessments += n_assessments; assessment_rows.clear()
+            gc.collect()
 
-            total_assessments += len(assessment_rows)
             logger.info(
                 f"Chunk {offset}-{offset + chunk_len}: "
-                f"{len(assessment_rows)} assessments | Total: {total_assessments}"
+                f"{n_assessments} assessments | Total: {total_assessments}"
             )
             offset += STREAM_BATCH_SIZE
 
@@ -1332,7 +1342,7 @@ with DAG(
     )
 
     end = EmptyOperator(task_id='end')
-
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
     # Payment pipeline: Extract -> Transform+Load
     extract_payments = PythonOperator(
         task_id='extract_payment_events',
