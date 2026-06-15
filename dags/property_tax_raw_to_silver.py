@@ -750,7 +750,7 @@ def extract_assessment(assessment: dict) -> dict:
     return {
         'tenant_id': assessment.get('tenantId', ''),
         'assessmentnumber': assessment.get('assessmentNumber', ''),
-        'financialyear': compute_financial_year(audit.get('createdTime')),
+        'financialyear': assessment.get('financialYear', ''),
         'propertyid': assessment.get('propertyId', ''),
         'status': assessment.get('status', ''),
         'source': assessment.get('source', ''),
