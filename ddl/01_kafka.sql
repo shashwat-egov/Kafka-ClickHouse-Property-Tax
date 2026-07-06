@@ -16,7 +16,7 @@ SETTINGS
     kafka_topic_list = 'save-property-registry,update-property-registry',
     kafka_group_name = 'clickhouse-property-consumer',
     kafka_format = 'JSONAsString',
-    kafka_num_consumers = 3,
+    kafka_num_consumers = 1,
     kafka_max_block_size = 65536,
     kafka_skip_broken_messages = 100;
 
@@ -31,7 +31,7 @@ SETTINGS
     kafka_topic_list = 'save-demand,update-demand',
     kafka_group_name = 'clickhouse-demand-consumer',
     kafka_format = 'JSONAsString',
-    kafka_num_consumers = 3,
+    kafka_num_consumers = 1,
     kafka_max_block_size = 65536,
     kafka_skip_broken_messages = 100;
 
@@ -47,7 +47,7 @@ SETTINGS
     kafka_topic_list = 'save-bill-db,update-bill-db',
     kafka_group_name = 'clickhouse-bill-consumer',
     kafka_format = 'JSONAsString',
-    kafka_num_consumers = 3,
+    kafka_num_consumers = 1,
     kafka_max_block_size = 65536,
     kafka_skip_broken_messages = 100;
 
@@ -63,7 +63,7 @@ SETTINGS
     kafka_topic_list = 'egov.collection.payment-create',
     kafka_group_name = 'clickhouse-payment-consumer',
     kafka_format = 'JSONAsString',
-    kafka_num_consumers = 3,
+    kafka_num_consumers = 1,
     kafka_max_block_size = 65536,
     kafka_skip_broken_messages = 100;
 
@@ -79,6 +79,6 @@ SETTINGS
     kafka_topic_list = 'save-pt-assessment,update-pt-assessment',
     kafka_group_name = 'clickhouse-assessment-consumer',
     kafka_format = 'JSONAsString',
-    kafka_num_consumers = 3,
+    kafka_num_consumers = 1,
     kafka_max_block_size = 65536,
     kafka_skip_broken_messages = 100;
