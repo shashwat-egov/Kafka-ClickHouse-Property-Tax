@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS replacing_test.kafka_demand_events
 ENGINE = Kafka
 SETTINGS
     kafka_broker_list = 'release-name-kafka.kafka-kraft.svc.cluster.local:9092',
-    kafka_topic_list = 'save-demand,update-demand',
+    kafka_topic_list = 'save-demand-event,update-demand-event',
     kafka_group_name = 'clickhouse-demand-consumer',
     kafka_format = 'JSONAsString',
     kafka_num_consumers = 1,
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS replacing_test.kafka_bill_events
 ENGINE = Kafka
 SETTINGS
     kafka_broker_list = 'release-name-kafka.kafka-kraft.svc.cluster.local:9092',
-    kafka_topic_list = 'save-bill-db,update-bill-db',
+    kafka_topic_list = 'save-bill-event,update-bill-event',
     kafka_group_name = 'clickhouse-bill-consumer',
     kafka_format = 'JSONAsString',
     kafka_num_consumers = 1,
@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS replacing_test.kafka_payment_events
 ENGINE = Kafka
 SETTINGS
     kafka_broker_list = 'release-name-kafka.kafka-kraft.svc.cluster.local:9092',
-    kafka_topic_list = 'egov.collection.payment-create',
+    kafka_topic_list = 'egov.collection.payment-create,egov.collection.payment-cancel',
     kafka_group_name = 'clickhouse-payment-consumer',
     kafka_format = 'JSONAsString',
     kafka_num_consumers = 1,
@@ -68,7 +68,7 @@ SETTINGS
     kafka_skip_broken_messages = 100;
 
 
--- Payment Events
+-- Assessment Events
 CREATE TABLE IF NOT EXISTS replacing_test.kafka_assessment_events
 (
     raw String
