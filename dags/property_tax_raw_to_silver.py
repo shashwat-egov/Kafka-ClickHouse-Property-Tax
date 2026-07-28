@@ -400,8 +400,8 @@ def fetch_bill_events(client, window_start: datetime,
                       window_end: datetime, limit: int,
                       last_ms: int = None,
                       last_id: str = None) -> List[tuple]:
-    """Fetch one keyset page of raw payment JSON — bill data is embedded in
-    Payment.paymentDetails[n].bill.
+    """Fetch one keyset page of raw bill JSON from bill_events_raw —
+    each event carries a top-level 'Bills' array of bill objects.
 
     Cursor-based on the (event_time, id) sort key:
     each page continues strictly after the last (event_time, id) seen, and because
@@ -412,7 +412,7 @@ def fetch_bill_events(client, window_start: datetime,
     """
     query = (
         "SELECT raw, event_time, id, toUnixTimestamp64Milli(event_time) AS et_ms "
-        "FROM payment_events_raw "
+        "FROM bill_events_raw "
         "WHERE event_time >= {start:DateTime64(3)} "
         "AND event_time < {end:DateTime64(3)} "
     )
@@ -433,10 +433,10 @@ def fetch_bill_events(client, window_start: datetime,
 
 def count_bill_events(client, window_start: datetime,
                       window_end: datetime) -> int:
-    """Count payment events — bill data is embedded inside each payment."""
+    """Count bill events in the time window (from bill_events_raw)."""
     result = run_query(
         client,
-        "SELECT count() FROM payment_events_raw "
+        "SELECT count() FROM bill_events_raw "
         "WHERE event_time >= {start:DateTime64(3)} "
         "AND event_time < {end:DateTime64(3)}",
         parameters={'start': window_start, 'end': window_end},
@@ -661,7 +661,7 @@ def extract_demand(demand: dict) -> dict:
         'consumer_code': demand.get('consumerCode', ''),
         'consumer_type': demand.get('consumerType', ''),
         'business_service': demand.get('businessService', ''),
-        'payer': demand.get('payer', {}).get('uuid', '') if isinstance(demand.get('payer'), dict) else demand.get('payer', ''),
+        'payer': demand.get('payer', {}).get('uuid', '') if isinstance(demand.get('payer'), dict) else (demand.get('payer') or ''),
         'tax_period_from': parse_ts(demand.get('taxPeriodFrom')) or EPOCH,
         'tax_period_to': parse_ts(demand.get('taxPeriodTo')) or EPOCH,
         'demand_status': demand.get('status', ''),
@@ -716,7 +716,7 @@ def extract_bill(bill: dict) -> dict:
     audit = bill.get('auditDetails', {}) or {}
     fy = compute_financial_year(audit.get('createdTime'))
 
-    return {
+    row = {
         'tenant_id': bill.get('tenantId', ''),
         'bill_id': bill.get('id', ''),
         'status': bill.get('status', ''),
@@ -738,6 +738,9 @@ def extract_bill(bill: dict) -> dict:
         'last_modified_time': parse_ts(audit.get('lastModifiedTime')) or EPOCH,
         'financial_year': fy,
     }
+    # Bill events serialize absent fields as explicit null; coalesce None -> '' for the
+    # non-Nullable String columns (numeric/date fields are already guarded above).
+    return {k: ('' if v is None else v) for k, v in row.items()}
 
 
 def extract_bill_details(bill: dict) -> List[dict]:
@@ -755,7 +758,7 @@ def extract_bill_details(bill: dict) -> List[dict]:
         to_period = safe_int(detail.get('toPeriod', 0))
         fy = compute_financial_year(from_period)
 
-        rows.append({
+        detail_row = {
                'id': detail_id,
             'tenant_id': tenant_id,
             'demand_id': detail.get('demandId', ''),
@@ -779,7 +782,9 @@ def extract_bill_details(bill: dict) -> List[dict]:
             'last_modified_by': audit.get('lastModifiedBy', ''),
             'last_modified_time': parse_ts(audit.get('lastModifiedTime')) or EPOCH,
             'financial_year': fy,
-        })
+        }
+        # coalesce None -> '' for non-Nullable String columns (see extract_bill)
+        rows.append({k: ('' if v is None else v) for k, v in detail_row.items()})
     return rows
 
 
@@ -1275,7 +1280,7 @@ def extract_bill_events(**context):
 def transform_load_bill_events(**context):
     """For each chunk: extract from ClickHouse -> transform -> load into silver tables.
 
-    Each raw bill event carries a list of bills under the 'bills' key.
+    Each raw bill event (from bill_events_raw) carries a top-level 'Bills' array.
     For every bill we write to two silver tables:
       - bill_entity               (one row per bill)
       - bill_detail_entity        (one row per billDetail)
@@ -1317,8 +1322,6 @@ def transform_load_bill_events(**context):
             bill_rows = []
             detail_rows = []
 
-            seen_bill_ids: set = set()
-
             for raw_json, _et, _id, _ms in rows:
                 try:
                     event = json.loads(raw_json)
@@ -1326,14 +1329,14 @@ def transform_load_bill_events(**context):
                     logger.warning("Skipping invalid JSON")
                     continue
 
-                # Bill is embedded in Payment.paymentDetails[n].bill
-                payment = event.get('Payment', {}) or {}
-                for pd in (payment.get('paymentDetails', []) or []):
-                    bill = pd.get('bill', {}) or {}
+                # Bill events carry a top-level 'Bills' array of bill objects.
+                # Insert every event (no cross-event dedup) so each bill update over time
+                # is captured; ReplacingMergeTree keeps the latest per bill_id via
+                # last_modified_time.
+                for bill in (event.get('Bills', []) or []):
                     bill_id = bill.get('id', '')
-                    if not bill_id or bill_id in seen_bill_ids:
+                    if not bill_id:
                         continue
-                    seen_bill_ids.add(bill_id)
                     bill_rows.append(extract_bill(bill))
                     detail_rows.extend(extract_bill_details(bill))
 
